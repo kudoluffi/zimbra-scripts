@@ -62,27 +62,22 @@ log "Requesting Let's Encrypt certificate for $FQDN..."
 if [ -n "$LE_EMAIL" ]; then
   certbot certonly \
     --standalone \
-    --preferred-challenges http \
+    --preferred-challenges "ISRG Root X1" \
     -d "$FQDN" \
     --email "$LE_EMAIL" \
     --agree-tos \
     --non-interactive \
-    --expand \
-    --keep-until-expiring \
-    --cert-name "$FQDN" \
+    --key-type rsa \
     2>&1 | tee -a "$LOG_FILE"
 else
   warn "Email skipped. Account recovery will be limited."
   certbot certonly \
     --standalone \
-    --preferred-challenges http \
+    --preferred-challenges "ISRG Root X1" \
     -d "$FQDN" \
     --register-unsafely-without-email \
     --agree-tos \
     --non-interactive \
-    --expand \
-    --keep-until-expiring \
-    --cert-name "$FQDN" \
     2>&1 | tee -a "$LOG_FILE"
 fi
 
