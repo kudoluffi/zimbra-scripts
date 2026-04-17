@@ -32,10 +32,11 @@ log "Detected OS: $PRETTY_NAME"
 # ─────────────────────────────────────────────────────────────────────────────
 read -rp "FQDN (mail.example.com): " FQDN
 read -rp "IP Internal Server: " SERVER_IP
+read -rp "IP Gateway: " GATEWAY_IP
 read -rp "Upstream DNS (8.8.8.8/1.1.1.1): " UPSTREAM_DNS
 read -rp "Domain Email (example.com): " MAIL_DOMAIN
 
-[[ -z "$FQDN" || -z "$SERVER_IP" || -z "$UPSTREAM_DNS" || -z "$MAIL_DOMAIN" ]] && err "Semua field wajib diisi."
+[[ -z "$FQDN" || -z "$SERVER_IP" || -z "$GATEWAY_IP" || -z "$UPSTREAM_DNS" || -z "$MAIL_DOMAIN" ]] && err "Semua field wajib diisi."
 HOSTNAME_SHORT="${FQDN%%.*}"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,6 +91,7 @@ domain=${MAIL_DOMAIN}
 mx-host=${MAIL_DOMAIN},${FQDN},10
 local=/${MAIL_DOMAIN}/
 server=${UPSTREAM_DNS}
+server=${GATEWAY_IP}
 addn-hosts=/etc/hosts
 cache-size=1000
 dns-forward-max=150
