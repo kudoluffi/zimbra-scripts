@@ -78,6 +78,7 @@ else
     --register-unsafely-without-email \
     --agree-tos \
     --non-interactive \
+    --key-type rsa \
     2>&1 | tee -a "$LOG_FILE"
 fi
 
