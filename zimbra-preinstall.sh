@@ -185,6 +185,9 @@ log "Fail2Ban installed & running. JAIL ZIMBRA-AUTH masih DISABLED (aktifkan pos
 # TIME SYNC (SAFE FALLBACK)
 # ─────────────────────────────────────────────────────────────────────────────
 log "Configuring time synchronization..."
+# Fix: Unmask service yang sering diblokir di image VPS/cloud tertentu
+systemctl unmask systemd-timesyncd 2>/dev/null || true
+
 if systemctl list-unit-files | grep -q chrony.service; then
     systemctl enable chrony
     systemctl restart chrony
