@@ -119,7 +119,7 @@ Setelah Zimbra Selesai Install:
 ```bash
 sudo sed -i 's/enabled  = false/enabled  = true/' /etc/fail2ban/jail.d/zimbra.conf
 sudo systemctl restart fail2ban
-fail2ban-client status zimbra-auth
+sudo fail2ban-client status zimbra-auth
 ```
 ### 2. Whitelist IP Kantor
 Edit /etc/fail2ban/jail.d/zimbra.conf:
