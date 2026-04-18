@@ -1,0 +1,25 @@
+# Logs
+*.log
+
+# Backup files
+*.bak
+*.backup
+
+# Temporary files
+/tmp/
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sensitive
+*.key
+*.pem
+.env
