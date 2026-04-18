@@ -31,7 +31,7 @@ Script `zimbra-letsencrypt.sh` adalah automation tool untuk menerbitkan, deploy,
 
 ### 1. Download Script
 ```bash
-wget https://raw.githubusercontent.com/USERNAME/zimbra-scripts/main/scripts/zimbra-letsencrypt.sh
+wget https://raw.githubusercontent.com/kudoluffi/zimbra-scripts/main/scripts/zimbra-letsencrypt.sh
 chmod +x zimbra-letsencrypt.sh
 ```
 ### 2. Prasyarat Wajib
