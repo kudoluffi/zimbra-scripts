@@ -13,8 +13,8 @@ Kumpulan script otomatisasi untuk instalasi, konfigurasi, dan maintenance **Zimb
 
 | Script | Deskripsi | Status |
 |--------|-----------|--------|
-| [`zimbra_preinstall.sh`](scripts/zimbra-preinstall.sh) | Persiapan sistem sebelum instalasi Zimbra (DNS, Firewall, Fail2Ban, Dependencies) | ✅ Stable v14.7 |
-| [`zimbra_letsencrypt.sh`](scripts/zimbra_letsencrypt.sh) | Otomatisasi SSL Let's Encrypt untuk Zimbra + Auto Renewal | ✅ Stable v1.2 |
+| [`zimbra-preinstall.sh`](scripts/zimbra-preinstall.sh) | Persiapan sistem sebelum instalasi Zimbra (DNS, Firewall, Fail2Ban, Dependencies) | ✅ Stable v14.7 |
+| [`zimbra-letsencrypt.sh`](scripts/zimbra-letsencrypt.sh) | Otomatisasi SSL Let's Encrypt untuk Zimbra + Auto Renewal | ✅ Stable v1.2 |
 | _zimbra_backup.sh_ | Backup otomatis Zimbra (Coming Soon) | 🚧 Development |
 | _zimbra_migration.sh_ | Migrasi Zimbra ke server baru (Coming Soon) | 🚧 Development |
 
