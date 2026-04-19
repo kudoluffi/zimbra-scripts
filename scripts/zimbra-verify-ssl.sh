@@ -1,9 +1,11 @@
 #!/bin/bash
-# zimbra-verify-ssl.sh v1.0
+# zimbra-verify-ssl.sh v1.1
 # Verify SSL certificate deployment across all Zimbra services
+# FIXED: Removed set -eo pipefail to prevent early exit
 # Usage: sudo bash zimbra-verify-ssl.sh
 
-set -eo pipefail
+# Jangan gunakan set -eo pipefail agar script tidak berhenti saat grep/openssl gagal
+set -u
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -29,77 +31,77 @@ FAIL_COUNT=0
 # 1. Check Certificate in Zimbra Config
 # ─────────────────────────────────────────────────────────────────────────────
 log "1. Checking deployed certificate..."
-CERT_INFO=$(su - zimbra -c "/opt/zimbra/bin/zmcertmgr viewdeployedcrt" 2>&1)
+CERT_INFO=$(su - zimbra -c "/opt/zimbra/bin/zmcertmgr viewdeployedcrt" 2>&1) || true
 
 if echo "$CERT_INFO" | grep -q "$FQDN"; then
   pass "Certificate deployed for FQDN: $FQDN"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
   
   # Show expiry date
   EXPIRY=$(echo "$CERT_INFO" | grep "Not After" | head -1)
   log "   $EXPIRY"
 else
   fail "Certificate not properly deployed"
-  ((FAIL_COUNT++))
+  FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Check HTTPS (Port 443)
 # ─────────────────────────────────────────────────────────────────────────────
 log "2. Checking HTTPS (Port 443)..."
-HTTPS_CHECK=$(echo | timeout 5 openssl s_client -connect "$FQDN:443" -servername "$FQDN" 2>/dev/null | openssl x509 -noout -subject -issuer -dates 2>&1)
+HTTPS_CHECK=$(echo | timeout 5 openssl s_client -connect "$FQDN:443" -servername "$FQDN" 2>/dev/null | openssl x509 -noout -subject -issuer -dates 2>&1) || true
 
 if echo "$HTTPS_CHECK" | grep -q "$FQDN"; then
   pass "HTTPS certificate valid"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
   
   # Show certificate info
   echo "$HTTPS_CHECK" | head -5 | sed 's/^/   /'
 else
   fail "HTTPS certificate check failed"
-  ((FAIL_COUNT++))
+  FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Check IMAPS (Port 993)
 # ─────────────────────────────────────────────────────────────────────────────
 log "3. Checking IMAPS (Port 993)..."
-IMAP_CHECK=$(echo | timeout 5 openssl s_client -connect "$FQDN:993" -servername "$FQDN" 2>&1 | grep -E "(Verify return|subject)" | head -2)
+IMAP_CHECK=$(echo | timeout 5 openssl s_client -connect "$FQDN:993" -servername "$FQDN" 2>&1 | grep -E "(Verify return|subject)" | head -2) || true
 
 if echo "$IMAP_CHECK" | grep -q "Verify return code: 0"; then
   pass "IMAPS certificate valid"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
 else
   warn "IMAPS certificate verification skipped (self-signed CA is normal)"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Check POP3S (Port 995)
 # ─────────────────────────────────────────────────────────────────────────────
 log "4. Checking POP3S (Port 995)..."
-POP3_CHECK=$(echo | timeout 5 openssl s_client -connect "$FQDN:995" -servername "$FQDN" 2>&1 | grep -E "(Verify return|subject)" | head -2)
+POP3_CHECK=$(echo | timeout 5 openssl s_client -connect "$FQDN:995" -servername "$FQDN" 2>&1 | grep -E "(Verify return|subject)" | head -2) || true
 
 if [ -n "$POP3_CHECK" ]; then
   pass "POP3S certificate valid"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
 else
   warn "POP3S check skipped (service may not be enabled)"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Check SMTPS (Port 465)
 # ─────────────────────────────────────────────────────────────────────────────
 log "5. Checking SMTPS (Port 465)..."
-SMTP_CHECK=$(echo | timeout 5 openssl s_client -connect "$FQDN:465" -servername "$FQDN" 2>&1 | grep -E "(Verify return|subject)" | head -2)
+SMTP_CHECK=$(echo | timeout 5 openssl s_client -connect "$FQDN:465" -servername "$FQDN" 2>&1 | grep -E "(Verify return|subject)" | head -2) || true
 
 if [ -n "$SMTP_CHECK" ]; then
   pass "SMTPS certificate valid"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
 else
   warn "SMTPS check skipped (service may not be enabled)"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,24 +111,24 @@ log "6. Checking certificate expiry..."
 CERT_FILE="/etc/letsencrypt/live/$FQDN/cert.pem"
 
 if [ -f "$CERT_FILE" ]; then
-  EXPIRY_DATE=$(openssl x509 -in "$CERT_FILE" -noout -enddate | cut -d= -f2)
-  EXPIRY_EPOCH=$(date -d "$EXPIRY_DATE" +%s)
+  EXPIRY_DATE=$(openssl x509 -in "$CERT_FILE" -noout -enddate | cut -d= -f2) || true
+  EXPIRY_EPOCH=$(date -d "$EXPIRY_DATE" +%s) || true
   NOW_EPOCH=$(date +%s)
   DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
   
-  if [ $DAYS_LEFT -gt 30 ]; then
+  if [ "$DAYS_LEFT" -gt 30 ]; then
     pass "Certificate expires in $DAYS_LEFT days ($EXPIRY_DATE)"
-    ((PASS_COUNT++))
-  elif [ $DAYS_LEFT -gt 7 ]; then
+    PASS_COUNT=$((PASS_COUNT + 1))
+  elif [ "$DAYS_LEFT" -gt 7 ]; then
     warn "Certificate expires in $DAYS_LEFT days ($EXPIRY_DATE) - RENEW SOON!"
-    ((PASS_COUNT++))
+    PASS_COUNT=$((PASS_COUNT + 1))
   else
     fail "Certificate expires in $DAYS_LEFT days ($EXPIRY_DATE) - RENEW NOW!"
-    ((FAIL_COUNT++))
+    FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
 else
   fail "Certificate file not found: $CERT_FILE"
-  ((FAIL_COUNT++))
+  FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,18 +136,18 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 log "7. Checking auto-renewal cron..."
 if [ -f /etc/cron.d/zimbra-le-renew ]; then
-  CRON_CONTENT=$(cat /etc/cron.d/zimbra-le-renew)
+  CRON_CONTENT=$(cat /etc/cron.d/zimbra-le-renew) || true
   if echo "$CRON_CONTENT" | grep -q "zimbra-le-renew.sh"; then
     pass "Auto-renewal cron configured"
-    ((PASS_COUNT++))
+    PASS_COUNT=$((PASS_COUNT + 1))
     log "   Schedule: $(echo $CRON_CONTENT | grep -v '^#' | awk '{print $1,$2,$3,$4,$5}')"
   else
     fail "Auto-renewal cron misconfigured"
-    ((FAIL_COUNT++))
+    FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
 else
   fail "Auto-renewal cron not found"
-  ((FAIL_COUNT++))
+  FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,7 +159,7 @@ if systemctl is-active --quiet certbot.timer 2>/dev/null; then
   log "   Run: systemctl disable --now certbot.timer"
 else
   pass "certbot.timer is inactive (correct)"
-  ((PASS_COUNT++))
+  PASS_COUNT=$((PASS_COUNT + 1))
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,7 +172,7 @@ echo -e "Passed: ${GREEN}$PASS_COUNT${NC}"
 echo -e "Failed: ${RED}$FAIL_COUNT${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
-if [ $FAIL_COUNT -eq 0 ]; then
+if [ "$FAIL_COUNT" -eq 0 ]; then
   echo -e "${GREEN}✅ All SSL checks passed! Ready for next step.${NC}\n"
   exit 0
 else
