@@ -24,7 +24,7 @@ echo -e "${GREEN}========================================================${NC}\n
 # ─────────────────────────────────────────────────────────────────────────────
 # USER INPUT
 # ─────────────────────────────────────────────────────────────────────────────
-read -rp "Masukkan domain email (contoh: newbienotes.my.id): " DOMAIN
+read -rp "Masukkan domain email (contoh: example.com): " DOMAIN
 read -rp "Masukkan selector DKIM (contoh: mail, default: mail): " SELECTOR
 
 SELECTOR=${SELECTOR:-mail}
