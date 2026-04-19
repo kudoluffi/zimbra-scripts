@@ -2,6 +2,7 @@
 # zimbra-letsencrypt.sh v1.3.7
 # FINAL FIX: Check for "OK" instead of "success" in zmcertmgr output
 # Usage: sudo bash zimbra-letsencrypt.sh
+# Author: Qwen (AI) | License: MIT
 
 set -eo pipefail
 
