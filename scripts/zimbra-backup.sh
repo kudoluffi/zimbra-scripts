@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-backup.sh v1.7
-# FIXED: Correct permission for password files (zimbra:zimbra)
+# zimbra-backup.sh v1.8
+# FINAL VERSION - Exclude system accounts, YYYYMMDD format, overwrite same-day backups
 # Usage: sudo bash zimbra-backup.sh [full|incremental]
 
 set -u
@@ -16,12 +16,24 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 BACKUP_ROOT="/backup/zimbra"
-BACKUP_DATE=$(date +%Y%m%d-%H%M%S)
+# CHANGED: YYYYMMDD format only (no HHMMSS)
+BACKUP_DATE=$(date +%Y%m%d)
 DAY_OF_WEEK=$(date +%u)
 RETENTION_DAYS=30
 ZIMBRA_USER="zimbra"
 LOG_FILE="/var/log/zimbra-backup-${BACKUP_DATE}.log"
 SERVER_NAME=$(hostname -f)
+
+# EXCLUDED ACCOUNTS (regex patterns)
+EXCLUDE_PATTERNS=(
+  "^admin@"
+  "^spam\."
+  "^ham\."
+  "^virus-quarantine\."
+  "^galsync\."
+  "^postmaster@"
+  "^abuse@"
+)
 
 BACKUP_TYPE="${1:-auto}"
 if [ "$BACKUP_TYPE" = "auto" ]; then
@@ -33,6 +45,19 @@ if [ "$BACKUP_TYPE" = "auto" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FUNCTION: Check if account should be excluded
+# ─────────────────────────────────────────────────────────────────────────────
+should_exclude() {
+  local account="$1"
+  for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+    if echo "$account" | grep -qE "$pattern"; then
+      return 0  # Should exclude
+    fi
+  done
+  return 1  # Should not exclude
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PRE-CHECKS
 # ─────────────────────────────────────────────────────────────────────────────
 if [ "$(id -u)" -ne 0 ]; then
@@ -41,7 +66,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Backup Script (v1.7 - FIXED PERMISSION)${NC}"
+echo -e "${GREEN}  Zimbra Backup Script (v1.8 - FINAL)${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup Date: $BACKUP_DATE"
@@ -53,11 +78,9 @@ echo ""
 # Create backup directories
 log "Creating backup directories..."
 mkdir -p "$BACKUP_ROOT"/{config,mailboxes,distribution-lists,passwords,logs}
-# FIX: Password folder owned by zimbra (so zimbra can write)
 chown -R zimbra:zimbra "$BACKUP_ROOT"
 chmod 755 "$BACKUP_ROOT"
 chmod 755 "$BACKUP_ROOT"/*
-# FIX: Password folder MORE RESTRICTIVE
 chmod 700 "$BACKUP_ROOT/passwords"
 pass "Backup directories created"
 
@@ -137,13 +160,12 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. PASSWORD HASH BACKUP (FIXED PERMISSION!)
+# 3. PASSWORD HASH BACKUP
 # ─────────────────────────────────────────────────────────────────────────────
 log "3. Backing up password hashes..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   mkdir -p "$BACKUP_ROOT/passwords/${BACKUP_DATE}"
-  # FIX: Owned by zimbra (so zimbra can write AND restore script can read)
   chown zimbra:zimbra "$BACKUP_ROOT/passwords/${BACKUP_DATE}"
   chmod 700 "$BACKUP_ROOT/passwords/${BACKUP_DATE}"
   
@@ -151,16 +173,19 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   
   while IFS= read -r account; do
     if [ -n "$account" ] && echo "$account" | grep -q "@"; then
+      if should_exclude "$account"; then
+        log "   Skipping password for excluded account: $account"
+        continue
+      fi
+      
       SAFE_NAME=$(echo "$account" | tr '@' '_')
       
-      # Extract password hash
       su - $ZIMBRA_USER -c "zmprov -l ga '$account' userPassword" 2>/dev/null | \
         grep "userPassword:" | \
         awk '{print $2}' > "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
       
       if [ -s "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow" ]; then
         PASSWORD_BACKUP_COUNT=$((PASSWORD_BACKUP_COUNT + 1))
-        # FIX: Each file owned by zimbra, permission 600
         chown zimbra:zimbra "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
         chmod 600 "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
       fi
@@ -169,25 +194,25 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   
   pass "   Password hashes backed up: $PASSWORD_BACKUP_COUNT accounts"
   
-  # SECURITY WARNING
   warn "   ⚠️  PASSWORD FILES ARE SENSITIVE!"
   warn "   ⚠️  Location: $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
   warn "   ⚠️  Permission: 700 (zimbra only)"
-  warn "   ⚠️  Protect backup directory from unauthorized access!"
 else
   warn "   Skipping password backup (no accounts found)"
   PASSWORD_BACKUP_COUNT=0
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. MAILBOX BACKUP
+# 4. MAILBOX BACKUP (EXCLUDE SYSTEM ACCOUNTS)
 # ─────────────────────────────────────────────────────────────────────────────
 log "4. Backing up mailboxes ($BACKUP_TYPE)..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   BACKUP_SUCCESS=0
   BACKUP_FAILED=0
+  SKIPPED_COUNT=0
   
+  # CHANGED: YYYYMMDD format only (will overwrite if run multiple times same day)
   mkdir -p "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
   chown zimbra:zimbra "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
   
@@ -196,9 +221,17 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
       continue
     fi
     
+    # CHECK: Skip excluded accounts
+    if should_exclude "$account"; then
+      log "   Skipping excluded account: $account"
+      SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+      continue
+    fi
+    
     ACCOUNT_NAME=$(echo "$account" | cut -d@ -f1)
     log "   Backing up: $account"
     
+    # CHANGED: YYYYMMDD format (overwrite if exists)
     MAILBOX_BACKUP_FILE="$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}.tgz"
     
     su - $ZIMBRA_USER -c "zmmailbox -z -m '$account' getRestURL '//?fmt=tgz' > '$MAILBOX_BACKUP_FILE'" 2>&1 | tee -a "$LOG_FILE"
@@ -215,7 +248,7 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   done < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt"
   
   echo ""
-  pass "   Mailbox backup: $BACKUP_SUCCESS success, $BACKUP_FAILED failed"
+  pass "   Mailbox backup: $BACKUP_SUCCESS success, $BACKUP_FAILED failed, $SKIPPED_COUNT skipped (system accounts)"
 else
   warn "   Skipping mailbox backup (no valid accounts found)"
   BACKUP_SUCCESS=0
@@ -223,20 +256,25 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. USER DATA
+# 5. USER DATA (EXCLUDE SYSTEM ACCOUNTS)
 # ─────────────────────────────────────────────────────────────────────────────
 log "5. Backing up user data (filters, signatures, preferences)..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
+  USER_DATA_COUNT=0
   while IFS= read -r account; do
     if [ -n "$account" ] && echo "$account" | grep -q "@"; then
+      if should_exclude "$account"; then
+        continue
+      fi
       ACCOUNT_NAME=$(echo "$account" | cut -d@ -f1)
       su - $ZIMBRA_USER -c "zmprov ga '$account' > '$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-preferences.txt'" 2>/dev/null
       su - $ZIMBRA_USER -c "zmprov gf '$account' > '$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-filters.txt'" 2>/dev/null
       su - $ZIMBRA_USER -c "zmprov gas '$account' > '$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-signatures.txt'" 2>/dev/null
+      USER_DATA_COUNT=$((USER_DATA_COUNT + 1))
     fi
   done < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt"
-  pass "   User data exported"
+  pass "   User data exported: $USER_DATA_COUNT accounts"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -265,7 +303,7 @@ if [ -n "$OLD_PASS_BACKUPS" ]; then
   pass "   Deleted old password backups"
 fi
 
-# Clean old config files
+# Clean old config files (keep latest 10)
 log "   Cleaning old config files..."
 cd "$BACKUP_ROOT/config" && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm --
 pass "   Old config files cleaned"
@@ -280,7 +318,7 @@ TOTAL_BACKUP_SIZE=$(du -sh "$BACKUP_ROOT" 2>/dev/null | cut -f1)
 
 cat > "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt" <<EOF
 ========================================================
-  ZIMBRA BACKUP SUMMARY (v1.7 - FIXED)
+  ZIMBRA BACKUP SUMMARY (v1.8 - FINAL)
 ========================================================
 Backup Date:    $BACKUP_DATE
 Server:         $SERVER_NAME
@@ -293,7 +331,8 @@ Accounts:       $ACCOUNT_COUNT
 Dist. Lists:    $DL_COUNT
 Password Hash : $PASSWORD_BACKUP_COUNT
 Mailbox Success: $BACKUP_SUCCESS
-Mailbox Failed:  $BACKUP_FAILED
+Mailbox Failed : $BACKUP_FAILED
+System Accounts Skipped: $SKIPPED_COUNT
 ========================================================
 
 BACKUP INCLUDES:
@@ -302,9 +341,18 @@ BACKUP INCLUDES:
 ✅ Local Configuration
 ✅ All Accounts List
 ✅ All Distribution Lists
-✅ Password Hashes (per account, .shadow files)
-✅ Mailboxes (TGZ via zmmailbox)
+✅ Password Hashes (user accounts only)
+✅ Mailboxes (user accounts only, TGZ)
 ✅ User Preferences, Filters, Signatures
+
+EXCLUDED SYSTEM ACCOUNTS:
+❌ admin@* (administrative)
+❌ spam.* (spam quarantine)
+❌ ham.* (ham quarantine)
+❌ virus-quarantine.* (virus quarantine)
+❌ galsync.* (GAL sync)
+❌ postmaster@* (system)
+❌ abuse@* (system)
 
 ⚠️  SECURITY WARNING - PASSWORD FILES:
 🔒 Location: $BACKUP_ROOT/passwords/${BACKUP_DATE}/
@@ -343,6 +391,7 @@ echo -e "Dist. Lists   : $DL_COUNT"
 echo -e "Password Hash : $PASSWORD_BACKUP_COUNT"
 echo -e "Mailbox Success: $BACKUP_SUCCESS"
 echo -e "Mailbox Failed : $BACKUP_FAILED"
+echo -e "System Skipped : $SKIPPED_COUNT"
 echo -e "Retention     : $RETENTION_DAYS days"
 echo -e "Backup Root   : $BACKUP_ROOT"
 echo -e "Log File      : $LOG_FILE"
@@ -354,7 +403,8 @@ echo -e "${YELLOW}Next Steps:${NC}"
 echo -e "1. Review log file: cat $LOG_FILE"
 echo -e "2. Verify password files: ls -la $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
 echo -e "3. Verify backup: bash zimbra-verify-backup.sh $BACKUP_DATE"
-echo -e "4. Test restore procedure (see zimbra-restore-*.sh scripts)"
+echo -e "4. Setup cron for automated backup"
+echo -e "5. Test restore procedure periodically"
 echo -e "${GREEN}========================================================${NC}\n"
 
 cp "$LOG_FILE" "$BACKUP_ROOT/logs/"
