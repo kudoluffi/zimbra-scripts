@@ -11,11 +11,12 @@ Kumpulan script otomatisasi untuk instalasi, konfigurasi, dan maintenance **Zimb
 
 ## 📋 Daftar Script
 
-| Script | Dokumen | Deskripsi | Status |
-|--------|---------|-----------|--------|
-| [`zimbra-preinstall.sh`](scripts/zimbra-preinstall.sh) | [zimbra-preinstall.md](docs/zimbra-preinstall.md) | Persiapan sistem sebelum instalasi Zimbra (DNS, Firewall, Fail2Ban, Dependencies) | ✅ Stable v14.7 |
-| [`zimbra-letsencrypt.sh`](scripts/zimbra-letsencrypt.sh) | [zimbra-letsencrypt.md](docs/zimbra-letsencrypt.md) | Otomatisasi SSL Let's Encrypt untuk Zimbra + Auto Renewal | ✅ Stable v1.2 |
-| [`zimbra-dkim-setup.sh`](scripts/zimbra-dkim-stup.sh) | [zimbra-dkim-setup.md](docs/zimbra-dkim-setup.md) | Otomatisasi SSL Let's Encrypt untuk Zimbra + Auto Renewal | ✅ Stable v1.2 |
+| Script | Dokumentasi | Deskripsi | Status |
+|--------|-------------|-----------|--------|
+| [`zimbra-preinstall.sh`](scripts/zimbra-preinstall.sh) | [`zimbra-preinstall.md`](docs/zimbra-preinstall.md) | Persiapan sistem sebelum instalasi Zimbra (DNS, Firewall, Fail2Ban, Dependencies) | ✅ Stable v14.7 |
+| [`zimbra-letsencrypt.sh`](scripts/zimbra-letsencrypt.sh) | [`zimbra-letsencrypt.md`](docs/zimbra-letsencrypt.md) | Otomatisasi SSL Let's Encrypt untuk Zimbra + Auto Renewal | ✅ Stable v1.2 |
+| [`zimbra-dkim-setup.sh`](scripts/zimbra-dkim-stup.sh) | [`zimbra-dkim-setup.md`](docs/zimbra-dkim-setup.md) | Setup DKIM, SPF, DMARC untuk email authentication | ✅ Stable v1.6 |
+| [`zimbra-verify-ssl.sh`](scripts/zimbra-verify-ssl.sh) | [`zimbra-dkim-setup.md`](docs/zimbra-verify-ssl.md) | Verifikasi SSL deployment di semua layanan Zimbra | ✅ Stable v1.1 |
 | _zimbra_backup.sh_ |  | Backup otomatis Zimbra (Coming Soon) | 🚧 Development |
 | _zimbra_migration.sh_ | | Migrasi Zimbra ke server baru (Coming Soon) | 🚧 Development |
 
