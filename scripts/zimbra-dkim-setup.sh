@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-dkim-setup.sh v1.4
-# Configure DKIM signing for Zimbra OSE (FINAL CORRECT: No file, use -q query)
+# zimbra-dkim-setup.sh v1.5
+# Configure DKIM signing for Zimbra OSE (FIXED: Proper selector extraction)
 # Usage: sudo bash zimbra-dkim-setup.sh
 
 set -u
@@ -18,7 +18,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra DKIM Setup (OSE - Correct Version)${NC}"
+echo -e "${GREEN}  Zimbra DKIM Setup (OSE - Fixed Selector Extraction)${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -40,23 +40,55 @@ log "Selector: $SELECTOR"
 log "1. Checking existing DKIM keys..."
 
 EXISTING_DKIM=$(su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -q -d $DOMAIN" 2>&1)
+echo "$EXISTING_DKIM" | tee -a /tmp/dkim_setup.log
 
-if echo "$EXISTING_DKIM" | grep -q "DKIM not configured"; then
+if echo "$EXISTING_DKIM" | grep -qi "DKIM not configured\|no DKIM"; then
   log "   No existing DKIM found for $DOMAIN"
+  OLD_SELECTOR=""
 else
-  warn "   Existing DKIM found:"
-  echo "$EXISTING_DKIM" | grep "selector:" | sed 's/^/   /'
+  warn "   Existing DKIM found!"
   
-  read -rp "   Hapus DKIM yang lama? (y/n, default: n): " REMOVE_OLD
-  REMOVE_OLD=${REMOVE_OLD:-n}
+  # Extract ALL selectors from output
+  OLD_SELECTORS=$(echo "$EXISTING_DKIM" | grep -oP 'selector:\s*\K[^\s,]+' || true)
   
-  if [ "$REMOVE_OLD" = "y" ] || [ "$REMOVE_OLD" = "Y" ]; then
-    # Get existing selector
-    OLD_SELECTOR=$(echo "$EXISTING_DKIM" | grep -oP 'selector: \K[^\s]+' | head -1)
-    if [ -n "$OLD_SELECTOR" ]; then
-      log "   Removing old selector: $OLD_SELECTOR"
-      su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -r -d $DOMAIN -s $OLD_SELECTOR" 2>&1 | tee -a /tmp/dkim_setup.log
-      pass "   Old DKIM removed"
+  if [ -n "$OLD_SELECTORS" ]; then
+    echo ""
+    echo -e "${YELLOW}   Existing selector(s):${NC}"
+    echo "$OLD_SELECTORS" | while read sel; do
+      echo "      - $sel"
+    done
+    echo ""
+    
+    read -rp "   Hapus DKIM yang lama? (y/n, default: n): " REMOVE_OLD
+    REMOVE_OLD=${REMOVE_OLD:-n}
+    
+    if [ "$REMOVE_OLD" = "y" ] || [ "$REMOVE_OLD" = "Y" ]; then
+      # Remove ALL existing selectors
+      echo "$OLD_SELECTORS" | while read OLD_SELECTOR; do
+        if [ -n "$OLD_SELECTOR" ]; then
+          log "   Removing old selector: $OLD_SELECTOR"
+          su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -r -d $DOMAIN -s $OLD_SELECTOR" 2>&1 | tee -a /tmp/dkim_setup.log
+          pass "   Removed selector: $OLD_SELECTOR"
+        fi
+      done
+      
+      # Verify removal
+      sleep 2
+      CHECK_AFTER=$(su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -q -d $DOMAIN" 2>&1)
+      if echo "$CHECK_AFTER" | grep -qi "DKIM not configured\|no DKIM"; then
+        pass "   All old DKIM selectors removed"
+      else
+        warn "   Some selectors may still exist. Continuing anyway..."
+      fi
+    fi
+  else
+    warn "   Could not extract selector from output. Showing full output:"
+    echo "$EXISTING_DKIM"
+    echo ""
+    read -rp "   Continue anyway? (y/n, default: y): " CONTINUE
+    CONTINUE=${CONTINUE:-y}
+    if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
+      exit 1
     fi
   fi
 fi
@@ -67,10 +99,14 @@ fi
 log "2. Generating DKIM keys with selector '$SELECTOR'..."
 
 DKIM_OUTPUT=$(su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -a -d $DOMAIN -s $SELECTOR" 2>&1)
-echo "$DKIM_OUTPUT" | tee /tmp/dkim_setup.log
+echo "$DKIM_OUTPUT" | tee -a /tmp/dkim_setup.log
 
 if echo "$DKIM_OUTPUT" | grep -q "DKIM Data added to LDAP"; then
   pass "DKIM keys generated successfully with selector: $SELECTOR"
+elif echo "$DKIM_OUTPUT" | grep -q "already has DKIM enabled"; then
+  fail "Domain already has DKIM enabled. Please remove old DKIM first."
+  log "   Run: su - zimbra -c '/opt/zimbra/libexec/zmdkimkeyutil -r -d $DOMAIN -s <selector>'"
+  exit 1
 else
   fail "Failed to generate DKIM keys"
   exit 1
