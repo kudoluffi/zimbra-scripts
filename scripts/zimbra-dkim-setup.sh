@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-dkim-setup.sh v1.5
-# Configure DKIM signing for Zimbra OSE (FIXED: Proper selector extraction)
+# zimbra-dkim-setup.sh v1.6
+# Configure DKIM signing for Zimbra OSE (FINAL: Handle existing selector)
 # Usage: sudo bash zimbra-dkim-setup.sh
 
 set -u
@@ -18,7 +18,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra DKIM Setup (OSE - Fixed Selector Extraction)${NC}"
+echo -e "${GREEN}  Zimbra DKIM Setup (OSE - Handle Existing Selector)${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +35,7 @@ log "Domain: $DOMAIN"
 log "Selector: $SELECTOR"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Check if DKIM already exists
+# 1. Check existing DKIM keys
 # ─────────────────────────────────────────────────────────────────────────────
 log "1. Checking existing DKIM keys..."
 
@@ -44,72 +44,96 @@ echo "$EXISTING_DKIM" | tee -a /tmp/dkim_setup.log
 
 if echo "$EXISTING_DKIM" | grep -qi "DKIM not configured\|no DKIM"; then
   log "   No existing DKIM found for $DOMAIN"
-  OLD_SELECTOR=""
+  ACTION="create"
 else
   warn "   Existing DKIM found!"
   
-  # Extract ALL selectors from output
-  OLD_SELECTORS=$(echo "$EXISTING_DKIM" | grep -oP 'selector:\s*\K[^\s,]+' || true)
+  # Extract existing selectors
+  EXISTING_SELECTORS=$(echo "$EXISTING_DKIM" | grep -A1 "DKIM Selector:" | tail -1 | tr -d ' ')
   
-  if [ -n "$OLD_SELECTORS" ]; then
+  if [ -n "$EXISTING_SELECTORS" ]; then
     echo ""
     echo -e "${YELLOW}   Existing selector(s):${NC}"
-    echo "$OLD_SELECTORS" | while read sel; do
-      echo "      - $sel"
+    echo "$EXISTING_SELECTORS" | while read sel; do
+      [ -n "$sel" ] && echo "      - $sel"
     done
     echo ""
     
-    read -rp "   Hapus DKIM yang lama? (y/n, default: n): " REMOVE_OLD
-    REMOVE_OLD=${REMOVE_OLD:-n}
-    
-    if [ "$REMOVE_OLD" = "y" ] || [ "$REMOVE_OLD" = "Y" ]; then
-      # Remove ALL existing selectors
-      echo "$OLD_SELECTORS" | while read OLD_SELECTOR; do
-        if [ -n "$OLD_SELECTOR" ]; then
-          log "   Removing old selector: $OLD_SELECTOR"
-          su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -r -d $DOMAIN -s $OLD_SELECTOR" 2>&1 | tee -a /tmp/dkim_setup.log
-          pass "   Removed selector: $OLD_SELECTOR"
-        fi
-      done
+    # Check if requested selector already exists
+    if echo "$EXISTING_SELECTORS" | grep -qw "$SELECTOR"; then
+      warn "   ⚠️  Selector '$SELECTOR' ALREADY EXISTS!"
+      echo ""
+      echo "   Pilih tindakan:"
+      echo "   1) Keep existing (skip - DNS records tetap sama)"
+      echo "   2) Remove & regenerate (hapus lama, buat baru)"
+      echo "   3) Cancel"
+      echo ""
+      read -rp "   Pilihan (1/2/3, default: 1): " USER_CHOICE
+      USER_CHOICE=${USER_CHOICE:-1}
       
-      # Verify removal
-      sleep 2
-      CHECK_AFTER=$(su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -q -d $DOMAIN" 2>&1)
-      if echo "$CHECK_AFTER" | grep -qi "DKIM not configured\|no DKIM"; then
-        pass "   All old DKIM selectors removed"
+      case $USER_CHOICE in
+        1)
+          log "   Keeping existing selector '$SELECTOR'"
+          ACTION="skip"
+          ;;
+        2)
+          log "   Removing existing selector '$SELECTOR'..."
+          su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -r -d $DOMAIN -s $SELECTOR" 2>&1 | tee -a /tmp/dkim_setup.log
+          pass "   Removed selector: $SELECTOR"
+          ACTION="create"
+          ;;
+        3)
+          log "   Cancelled by user"
+          exit 0
+          ;;
+        *)
+          log "   Invalid choice, keeping existing"
+          ACTION="skip"
+          ;;
+      esac
+    else
+      # Different selector exists, ask to remove
+      echo ""
+      read -rp "   Hapus DKIM yang lama dan buat selector baru? (y/n, default: n): " REMOVE_OLD
+      REMOVE_OLD=${REMOVE_OLD:-n}
+      
+      if [ "$REMOVE_OLD" = "y" ] || [ "$REMOVE_OLD" = "Y" ]; then
+        echo "$EXISTING_SELECTORS" | while read OLD_SELECTOR; do
+          if [ -n "$OLD_SELECTOR" ]; then
+            log "   Removing old selector: $OLD_SELECTOR"
+            su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -r -d $DOMAIN -s $OLD_SELECTOR" 2>&1 | tee -a /tmp/dkim_setup.log
+            pass "   Removed selector: $OLD_SELECTOR"
+          fi
+        done
+        ACTION="create"
       else
-        warn "   Some selectors may still exist. Continuing anyway..."
+        log "   Keeping existing DKIM, not creating new one"
+        ACTION="skip"
       fi
     fi
   else
-    warn "   Could not extract selector from output. Showing full output:"
-    echo "$EXISTING_DKIM"
-    echo ""
-    read -rp "   Continue anyway? (y/n, default: y): " CONTINUE
-    CONTINUE=${CONTINUE:-y}
-    if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
-      exit 1
-    fi
+    warn "   Could not extract selector from output"
+    ACTION="skip"
   fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. Generate DKIM Keys with Custom Selector
+# 2. Generate DKIM Keys (if needed)
 # ─────────────────────────────────────────────────────────────────────────────
-log "2. Generating DKIM keys with selector '$SELECTOR'..."
-
-DKIM_OUTPUT=$(su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -a -d $DOMAIN -s $SELECTOR" 2>&1)
-echo "$DKIM_OUTPUT" | tee -a /tmp/dkim_setup.log
-
-if echo "$DKIM_OUTPUT" | grep -q "DKIM Data added to LDAP"; then
-  pass "DKIM keys generated successfully with selector: $SELECTOR"
-elif echo "$DKIM_OUTPUT" | grep -q "already has DKIM enabled"; then
-  fail "Domain already has DKIM enabled. Please remove old DKIM first."
-  log "   Run: su - zimbra -c '/opt/zimbra/libexec/zmdkimkeyutil -r -d $DOMAIN -s <selector>'"
-  exit 1
-else
-  fail "Failed to generate DKIM keys"
-  exit 1
+if [ "$ACTION" = "create" ]; then
+  log "2. Generating DKIM keys with selector '$SELECTOR'..."
+  
+  DKIM_OUTPUT=$(su - zimbra -c "/opt/zimbra/libexec/zmdkimkeyutil -a -d $DOMAIN -s $SELECTOR" 2>&1)
+  echo "$DKIM_OUTPUT" | tee -a /tmp/dkim_setup.log
+  
+  if echo "$DKIM_OUTPUT" | grep -q "DKIM Data added to LDAP"; then
+    pass "DKIM keys generated successfully with selector: $SELECTOR"
+  else
+    fail "Failed to generate DKIM keys"
+    exit 1
+  fi
+elif [ "$ACTION" = "skip" ]; then
+  log "2. Skipping DKIM generation (using existing keys)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,7 +147,7 @@ if echo "$DKIM_QUERY" | grep -q "$SELECTOR"; then
   pass "DKIM key found with selector: $SELECTOR"
   
   # Extract the public key from query output
-  PUBLIC_KEY=$(echo "$DKIM_QUERY" | grep -A1 "$SELECTOR" | tail -1 | sed 's/.*Public key: //')
+  PUBLIC_KEY=$(echo "$DKIM_QUERY" | grep -A3 "DKIM Public signature:" | tail -3 | tr -d '\n' | sed 's/.*DKIM Public signature:[^p]*p=/v=DKIM1; k=rsa; p=/' | sed 's/ )  ;.*//' | sed 's/"//g')
   
   echo ""
   echo -e "${GREEN}=== COPY DNS RECORDS INI KE PROVIDER ANDA ===${NC}"
@@ -157,7 +181,7 @@ if echo "$DKIM_QUERY" | grep -q "$SELECTOR"; then
   echo "   • Tunggu 5-60 menit untuk propagasi DNS"
   echo ""
 else
-  fail "DKIM key not found after generation"
+  fail "DKIM key not found"
   echo ""
   echo "Debug info:"
   echo "$DKIM_QUERY"
@@ -187,10 +211,6 @@ echo "4. Mail Server Tester (All-in-One):"
 echo "   https://www.mail-tester.com/"
 echo "   Kirim email test dari server ke address yang diberikan"
 echo ""
-echo "5. Gmail Test:"
-echo "   Kirim email dari user@${DOMAIN} ke gmail.com"
-echo "   Di Gmail: klik ⋮ → 'Show original' → cek SPF/DKIM/DMARC status"
-echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SUMMARY
@@ -201,11 +221,11 @@ echo -e "${GREEN}========================================================${NC}"
 echo -e "Domain           : $DOMAIN"
 echo -e "DKIM Selector    : $SELECTOR"
 echo -e "DNS DKIM Host    : ${SELECTOR}._domainkey.${DOMAIN}"
+echo -e "Status           : $([ "$ACTION" = "skip" ] && echo 'Using existing keys' || echo 'New keys generated')"
 echo -e "Storage          : LDAP (no file created)"
 echo -e "Log File         : /tmp/dkim_setup.log"
 echo -e "${YELLOW}Langkah Selanjutnya:${NC}"
 echo -e "1. Tambahkan SPF, DKIM, DMARC ke DNS provider"
-echo -e "   • DKIM Host: ${SELECTOR}._domainkey.${DOMAIN}"
 echo -e "2. Tunggu DNS propagate (5-60 menit)"
 echo -e "3. Verifikasi dengan external tools di atas"
 echo -e "4. Setelah semua OK, lanjut ke STEP 3 (Security Hardening)"
