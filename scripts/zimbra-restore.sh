@@ -1,7 +1,7 @@
 #!/bin/bash
-# zimbra-restore.sh v1.0
+# zimbra-restore.sh v1.1
 # Hybrid restore script for Zimbra 10.1.x OSE
-# Features: Modular restore with mutually exclusive options + status filter
+# Features: Modular restore with status filter + distribution list restore
 # Usage: sudo bash zimbra-restore.sh [OPTIONS] BACKUP_DATE
 
 set -u
@@ -53,6 +53,10 @@ while [[ $# -gt 0 ]]; do
       RESTORE_MODE="mailboxes"
       shift
       ;;
+    --distribution-lists)
+      RESTORE_MODE="distribution-lists"
+      shift
+      ;;
     --user)
       SINGLE_USER="$2"
       shift 2
@@ -69,22 +73,24 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: sudo bash zimbra-restore.sh [OPTIONS] BACKUP_DATE"
       echo ""
       echo "MODES (Mutually Exclusive - Pick One):"
-      echo "  --all              Restore everything (config + passwords + mailboxes)"
-      echo "  --config           Restore Zimbra configuration only"
-      echo "  --passwords        Restore password hashes only"
-      echo "  --mailboxes        Restore user mailboxes only (with status filter)"
-      echo "  --user USER        Restore single user (bypass all filters)"
+      echo "  --all                 Restore everything (config + passwords + mailboxes + DL)"
+      echo "  --config              Restore Zimbra configuration only"
+      echo "  --passwords           Restore password hashes only"
+      echo "  --mailboxes           Restore user mailboxes only (with status filter)"
+      echo "  --distribution-lists  Restore distribution lists only"
+      echo "  --user USER           Restore single user (bypass all filters)"
       echo ""
       echo "FILTERS (Only valid with --mailboxes):"
-      echo "  --status LIST      Restore accounts with status in LIST (comma-separated)"
-      echo "                     Default: active,locked,lockout"
-      echo "  --exclude LIST     Restore accounts NOT in LIST (comma-separated)"
+      echo "  --status LIST         Restore accounts with status in LIST (comma-separated)"
+      echo "                        Default: active,locked,lockout"
+      echo "  --exclude LIST        Restore accounts NOT in LIST (comma-separated)"
       echo ""
       echo "EXAMPLES:"
       echo "  sudo bash zimbra-restore.sh --all 20260419"
       echo "  sudo bash zimbra-restore.sh --mailboxes --status active 20260419"
       echo "  sudo bash zimbra-restore.sh --mailboxes --exclude closed,disabled 20260419"
       echo "  sudo bash zimbra-restore.sh --user admin@example.com 20260419"
+      echo "  sudo bash zimbra-restore.sh --distribution-lists 20260419"
       exit 0
       ;;
     *)
@@ -105,7 +111,7 @@ fi
 
 # Validate restore mode
 if [ -z "$RESTORE_MODE" ]; then
-  err "Restore mode required. Use --all, --config, --passwords, --mailboxes, or --user"
+  err "Restore mode required. Use --all, --config, --passwords, --mailboxes, --distribution-lists, or --user"
 fi
 
 # Validate mutually exclusive options
@@ -206,7 +212,6 @@ restore_config() {
   # Global config
   if [ -f "$CONFIG_DIR/global-config-${BACKUP_DATE}.txt" ]; then
     log "   Restoring global config..."
-    # Note: Review before applying in production!
     warn "   ⚠️  Global config restore requires manual review!"
     log "   File: $CONFIG_DIR/global-config-${BACKUP_DATE}.txt"
     pass "   Global config file ready for review"
@@ -336,18 +341,73 @@ restore_mailboxes() {
   pass "   Mailbox restore: $RESTORE_SUCCESS success, $RESTORE_FAILED failed, $SKIPPED_COUNT skipped"
 }
 
+restore_distribution_lists() {
+  log "Restoring distribution lists..."
+  
+  DL_LIST_FILE="$BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt"
+  
+  if [ ! -f "$DL_LIST_FILE" ]; then
+    warn "   Distribution list file not found"
+    return 1
+  fi
+  
+  DL_COUNT=$(wc -l < "$DL_LIST_FILE")
+  log "   Found $DL_COUNT distribution list(s) to restore"
+  
+  DL_RESTORED=0
+  DL_FAILED=0
+  DL_MEMBER_COUNT=0
+  
+  while IFS= read -r dl_email; do
+    if [ -n "$dl_email" ] && echo "$dl_email" | grep -q "@"; then
+      log "   Restoring DL: $dl_email"
+      
+      # Create DL if not exists (ignore error if already exists)
+      su - $ZIMBRA_USER -c "zmprov cdl '$dl_email'" 2>/dev/null || true
+      
+      # Restore members from member file
+      DL_SAFE_NAME=$(echo "$dl_email" | tr '@' '_' | tr '.' '_')
+      DL_MEMBER_FILE="$BACKUP_ROOT/distribution-lists/dl-members-${DL_SAFE_NAME}-${BACKUP_DATE}.txt"
+      
+      if [ -f "$DL_MEMBER_FILE" ]; then
+        # Extract members (skip header lines, only lines with @)
+        MEMBERS_ADDED=0
+        while IFS= read -r member; do
+          if [ -n "$member" ] && echo "$member" | grep -q "@"; then
+            su - $ZIMBRA_USER -c "zmprov adlm '$dl_email' '$member'" 2>/dev/null && \
+              MEMBERS_ADDED=$((MEMBERS_ADDED + 1))
+          fi
+        done < "$DL_MEMBER_FILE"
+        
+        DL_MEMBER_COUNT=$((DL_MEMBER_COUNT + MEMBERS_ADDED))
+        DL_RESTORED=$((DL_RESTORED + 1))
+        pass "      ✓ $dl_email ($MEMBERS_ADDED members)"
+      else
+        DL_FAILED=$((DL_FAILED + 1))
+        warn "      ✗ $dl_email (member file not found)"
+      fi
+    fi
+  done < "$DL_LIST_FILE"
+  
+  echo ""
+  pass "   Distribution lists restored: $DL_RESTORED success, $DL_FAILED failed"
+  log "   Total members restored: $DL_MEMBER_COUNT"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN RESTORE LOGIC
 # ─────────────────────────────────────────────────────────────────────────────
 case $RESTORE_MODE in
   all)
-    log "Starting full restore (config + passwords + mailboxes)..."
+    log "Starting full restore (config + passwords + mailboxes + distribution lists)..."
     echo ""
     restore_config
     echo ""
     restore_passwords
     echo ""
     restore_mailboxes
+    echo ""
+    restore_distribution_lists
     ;;
   config)
     restore_config
@@ -357,6 +417,9 @@ case $RESTORE_MODE in
     ;;
   mailboxes)
     restore_mailboxes
+    ;;
+  distribution-lists)
+    restore_distribution_lists
     ;;
   *)
     err "Unknown restore mode: $RESTORE_MODE"
@@ -376,7 +439,7 @@ echo -e "${YELLOW}Next Steps:${NC}"
 echo -e "1. Review restore log: cat /tmp/zimbra-restore.log"
 echo -e "2. Test user login and mailbox access"
 echo -e "3. Verify configuration settings"
-echo -e "4. Check distribution lists"
+echo -e "4. Test distribution list email delivery"
 echo -e "${GREEN}========================================================${NC}\n"
 
 exit 0
