@@ -140,9 +140,11 @@ RETENTION_DAYS=30  # Simpan 30 hari terakhir
 │       ├── akun2-preferences.txt
 │       └── BACKUP-SUMMARY.txt          # Backup summary
 ├── distribution-lists/
-│   ├── domains-20260419.txt            # All domains
-│   ├── accounts-20260419.txt           # All accounts
-│   └── distribution-lists-20260419.txt # All distribution lists
+│   ├── domains-20260419.txt              # All domains
+│   ├── accounts-20260419.txt             # All accounts
+│   ├── distribution-lists-20260419.txt   # All DL emails (zmprov gadl)
+│   ├── dl-members-all_example_com-20260419.txt
+│   ├── dl-members-distlist2_example_com-20260419.txt
 ├── passwords/
 │   └── 20260419/
 │       ├── akun1_example_com.shadow  # Password hash (600 permission)
