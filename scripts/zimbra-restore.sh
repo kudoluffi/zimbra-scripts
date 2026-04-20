@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v1.2
-# Redesigned: Single --mode option with comma-separated values
+# zimbra-restore.sh v1.3
+# FIXED: DL member header, --status all, auto-create accounts
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -u
@@ -55,27 +55,27 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE"
       echo ""
-      echo "MODES (comma-separated, pick one or more):"
-      echo "  config              Restore Zimbra configuration"
+      echo "MODES (comma-separated):"
+      echo "  config              Restore Zimbra configuration (global/server/local)"
       echo "  passwords           Restore password hashes"
-      echo "  mailboxes           Restore user mailboxes (with status filter)"
-      echo "  distribution-lists  Restore distribution lists"
-      echo "  all                 Restore everything (all modes above)"
+      echo "  mailboxes           Restore user mailboxes (requires accounts to exist)"
+      echo "  distribution-lists  Restore distribution lists and members"
+      echo "  all                 Restore everything"
       echo ""
-      echo "FILTERS (Only valid when 'mailboxes' is in MODES):"
+      echo "FILTERS (only for 'mailboxes' mode):"
       echo "  --status LIST       Restore accounts with status in LIST"
+      echo "                      Use 'all' to restore all accounts"
       echo "                      Default: active,locked,lockout"
       echo "  --exclude LIST      Restore accounts NOT in LIST"
       echo ""
-      echo "SINGLE USER MODE:"
-      echo "  --user USER@DOMAIN  Restore single user (bypass all filters)"
+      echo "SINGLE USER:"
+      echo "  --user USER@DOMAIN  Restore single user (bypass filters)"
       echo ""
       echo "EXAMPLES:"
       echo "  sudo bash zimbra-restore.sh --mode all 20260420"
-      echo "  sudo bash zimbra-restore.sh --mode mailboxes --status active 20260420"
+      echo "  sudo bash zimbra-restore.sh --mode mailboxes --status all 20260420"
       echo "  sudo bash zimbra-restore.sh --mode passwords,mailboxes 20260420"
-      echo "  sudo bash zimbra-restore.sh --mode mailboxes --exclude closed,disabled 20260420"
-      echo "  sudo bash zimbra-restore.sh --mode mailboxes --user admin@example.com 20260420"
+      echo "  sudo bash zimbra-restore.sh --mode mailboxes --exclude closed 20260420"
       exit 0
       ;;
     *)
@@ -89,47 +89,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Validate backup date
 if [ -z "$BACKUP_DATE" ]; then
-  err "Backup date required. Use: sudo bash zimbra-restore.sh --mode MODES BACKUP_DATE"
+  err "Backup date required"
 fi
 
-# Validate modes
 if [ -z "$MODES" ]; then
   err "Mode required. Use --mode with: config, passwords, mailboxes, distribution-lists, or all"
 fi
 
-# Expand 'all' to all modes
 if [ "$MODES" = "all" ]; then
   MODES="config,passwords,mailboxes,distribution-lists"
 fi
-
-# Validate filters only work with mailboxes mode
-if ! echo ",$MODES," | grep -q ",mailboxes,"; then
-  if [ -n "$STATUS_FILTER" ] || [ -n "$EXCLUDE_FILTER" ]; then
-    warn "--status and --exclude only work when 'mailboxes' is in --mode"
-    STATUS_FILTER=""
-    EXCLUDE_FILTER=""
-  fi
-fi
-
-# Validate --user is exclusive with filters
-if [ -n "$SINGLE_USER" ]; then
-  if [ -n "$STATUS_FILTER" ] || [ -n "$EXCLUDE_FILTER" ]; then
-    err "--user cannot be combined with --status or --exclude"
-  fi
-fi
-
-echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Restore Script${NC}"
-echo -e "${GREEN}========================================================${NC}\n"
-
-log "Backup Date: $BACKUP_DATE"
-log "Restore Modes: $MODES"
-[ -n "$STATUS_FILTER" ] && log "Status Filter: $STATUS_FILTER"
-[ -n "$EXCLUDE_FILTER" ] && log "Exclude Filter: $EXCLUDE_FILTER"
-[ -n "$SINGLE_USER" ] && log "Single User: $SINGLE_USER"
-echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
@@ -149,43 +119,84 @@ get_account_status() {
 should_restore_account() {
   local account="$1"
   
-  # Single user mode: always restore this user only
   if [ -n "$SINGLE_USER" ]; then
-    if [ "$account" = "$SINGLE_USER" ]; then
-      return 0
-    else
-      return 1
-    fi
+    [ "$account" = "$SINGLE_USER" ]
+    return $?
   fi
   
-  # Get account status
+  # FIX: Handle --status all
+  if [ "$STATUS_FILTER" = "all" ]; then
+    return 0
+  fi
+  
   local status=$(get_account_status "$account")
   
-  # Status filter mode
   if [ -n "$STATUS_FILTER" ]; then
     if echo ",$STATUS_FILTER," | grep -q ",$status,"; then
       return 0
     else
-      log "   Skipping $account (status: $status, not in filter)"
+      log "   Skipping $account (status: $status)"
       return 1
     fi
   fi
   
-  # Exclude filter mode
   if [ -n "$EXCLUDE_FILTER" ]; then
     if echo ",$EXCLUDE_FILTER," | grep -q ",$status,"; then
-      log "   Skipping $account (status: $status, in exclude list)"
+      log "   Skipping $account (status: $status, excluded)"
       return 1
     else
       return 0
     fi
   fi
   
-  # Default: restore active, locked, lockout
   if echo ",$DEFAULT_STATUS," | grep -q ",$status,"; then
     return 0
   else
-    log "   Skipping $account (status: $status, not in default filter)"
+    log "   Skipping $account (status: $status)"
+    return 1
+  fi
+}
+
+account_exists() {
+  local account="$1"
+  su - $ZIMBRA_USER -c "zmprov ga '$account' &>/dev/null" 2>/dev/null
+  return $?
+}
+
+create_account_if_needed() {
+  local account="$1"
+  
+  if account_exists "$account"; then
+    return 0
+  fi
+  
+  log "   Account not found, creating: $account"
+  
+  # Get password from backup if available
+  local safe_name=$(echo "$account" | tr '@' '_')
+  local password_file="$BACKUP_ROOT/passwords/$BACKUP_DATE/${safe_name}.shadow"
+  local temp_password="TempRestore123!"
+  
+  if [ -f "$password_file" ]; then
+    # Extract password hash
+    local password_hash=$(cat "$password_file")
+    if [ -n "$password_hash" ]; then
+      # Create account with password hash
+      su - $ZIMBRA_USER -c "zmprov ca '$account' '$password_hash' &>/dev/null" 2>/dev/null
+      if [ $? -eq 0 ]; then
+        log "   ✓ Account created with restored password"
+        return 0
+      fi
+    fi
+  fi
+  
+  # Fallback: create with temp password
+  su - $ZIMBRA_USER -c "zmprov ca '$account' '$temp_password' &>/dev/null" 2>/dev/null
+  if [ $? -eq 0 ]; then
+    warn "   ⚠ Account created with temp password: $temp_password"
+    return 0
+  else
+    fail "   ✗ Failed to create account"
     return 1
   fi
 }
@@ -195,32 +206,36 @@ should_restore_account() {
 # ─────────────────────────────────────────────────────────────────────────────
 restore_config() {
   log "Restoring Zimbra configuration..."
+  log "   ℹ️  Config restore requires MANUAL REVIEW before applying!"
+  log ""
+  log "   Files available:"
   
   CONFIG_DIR="$BACKUP_ROOT/config"
   
   if [ -f "$CONFIG_DIR/global-config-${BACKUP_DATE}.txt" ]; then
-    log "   Global config: $CONFIG_DIR/global-config-${BACKUP_DATE}.txt"
-    pass "   ✓ Global config file ready for review"
-  else
-    warn "   ✗ Global config file not found"
+    log "   • Global config: $CONFIG_DIR/global-config-${BACKUP_DATE}.txt"
+    log "     (Contains: zimbraDefaultDomainName, zimbraSkinLogoURL, etc.)"
   fi
   
   if [ -f "$CONFIG_DIR/server-config-${BACKUP_DATE}.txt" ]; then
-    log "   Server config: $CONFIG_DIR/server-config-${BACKUP_DATE}.txt"
-    pass "   ✓ Server config file ready for review"
-  else
-    warn "   ✗ Server config file not found"
+    log "   • Server config: $CONFIG_DIR/server-config-${BACKUP_DATE}.txt"
+    log "     (Contains: server-specific settings for $SERVER_NAME)"
   fi
   
   if [ -f "$CONFIG_DIR/local-config-${BACKUP_DATE}.txt" ]; then
-    log "   Local config: $CONFIG_DIR/local-config-${BACKUP_DATE}.txt"
-    pass "   ✓ Local config file ready for review"
-  else
-    warn "   ✗ Local config file not found"
+    log "   • Local config: $CONFIG_DIR/local-config-${BACKUP_DATE}.txt"
+    log "     (Contains: zmlocalconfig settings)"
   fi
   
-  warn "   ⚠️  Config restore requires MANUAL REVIEW before applying!"
-  pass "   Configuration restore completed (files ready for review)"
+  echo ""
+  log "   To apply config (DANGEROUS - review first!):"
+  log "   # Review changes:"
+  log "   cat $CONFIG_DIR/global-config-${BACKUP_DATE}.txt"
+  log ""
+  log "   # Apply selectively (example):"
+  log "   su - zimbra -c \"zmprov mcf zimbraSettingName value\""
+  echo ""
+  pass "   Configuration files ready for manual review"
 }
 
 restore_passwords() {
@@ -242,6 +257,12 @@ restore_passwords() {
       local account=$(echo "$filename" | tr '_' '@' | sed 's/@\([^.]*\)\./@\1./')
       
       if ! should_restore_account "$account"; then
+        continue
+      fi
+      
+      # Ensure account exists
+      if ! create_account_if_needed "$account"; then
+        RESTORE_FAILED=$((RESTORE_FAILED + 1))
         continue
       fi
       
@@ -295,6 +316,15 @@ restore_mailboxes() {
         continue
       fi
       
+      # Ensure account exists before restore mailbox
+      if ! account_exists "$account"; then
+        log "   Creating account before mailbox restore: $account"
+        if ! create_account_if_needed "$account"; then
+          SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+          continue
+        fi
+      fi
+      
       log "   Restoring mailbox: $account"
       
       su - $ZIMBRA_USER -c "zmrestore -a '$account' '$tgz_file'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null
@@ -334,15 +364,33 @@ restore_distribution_lists() {
     if [ -n "$dl_email" ] && echo "$dl_email" | grep -q "@"; then
       log "   Restoring DL: $dl_email"
       
+      # Create DL if not exists
       su - $ZIMBRA_USER -c "zmprov cdl '$dl_email'" 2>/dev/null || true
       
+      # Restore members
       DL_SAFE_NAME=$(echo "$dl_email" | tr '@' '_' | tr '.' '_')
       DL_MEMBER_FILE="$BACKUP_ROOT/distribution-lists/dl-members-${DL_SAFE_NAME}-${BACKUP_DATE}.txt"
       
       if [ -f "$DL_MEMBER_FILE" ]; then
         MEMBERS_ADDED=0
         while IFS= read -r member; do
-          if [ -n "$member" ] && echo "$member" | grep -q "@"; then
+          # FIX: Skip header lines and non-email lines
+          if [ -z "$member" ]; then
+            continue
+          fi
+          
+          # Skip lines starting with # (comments)
+          if echo "$member" | grep -q "^#"; then
+            continue
+          fi
+          
+          # Skip "members" header line
+          if [ "$member" = "members" ]; then
+            continue
+          fi
+          
+          # Only process lines that look like email addresses
+          if echo "$member" | grep -qE "^[^@]+@[^@]+\.[^@]+$"; then
             su - $ZIMBRA_USER -c "zmprov adlm '$dl_email' '$member'" 2>/dev/null && \
               MEMBERS_ADDED=$((MEMBERS_ADDED + 1))
           fi
@@ -366,10 +414,22 @@ restore_distribution_lists() {
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN RESTORE LOGIC
 # ─────────────────────────────────────────────────────────────────────────────
+SERVER_NAME=$(hostname -f)
+
+echo -e "\n${GREEN}========================================================${NC}"
+echo -e "${GREEN}  Zimbra Restore Script${NC}"
+echo -e "${GREEN}========================================================${NC}\n"
+
+log "Backup Date: $BACKUP_DATE"
+log "Restore Modes: $MODES"
+[ -n "$STATUS_FILTER" ] && log "Status Filter: $STATUS_FILTER"
+[ -n "$EXCLUDE_FILTER" ] && log "Exclude Filter: $EXCLUDE_FILTER"
+[ -n "$SINGLE_USER" ] && log "Single User: $SINGLE_USER"
+echo ""
+
 log "Starting restore process..."
 echo ""
 
-# Parse modes and execute
 if echo ",$MODES," | grep -q ",config,"; then
   restore_config
   echo ""
@@ -390,9 +450,6 @@ if echo ",$MODES," | grep -q ",distribution-lists,"; then
   echo ""
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SUMMARY
-# ─────────────────────────────────────────────────────────────────────────────
 echo -e "${GREEN}========================================================${NC}"
 echo -e "${GREEN}  RESTORE COMPLETED${NC}"
 echo -e "${GREEN}========================================================${NC}"
@@ -401,8 +458,8 @@ echo -e "Restore Modes: $MODES"
 echo -e "Log File    : /tmp/zimbra-restore.log"
 echo -e "${YELLOW}Next Steps:${NC}"
 echo -e "1. Review restore log: cat /tmp/zimbra-restore.log"
-echo -e "2. Test user login and mailbox access"
-echo -e "3. Verify configuration settings"
+echo -e "2. Test user login with restored passwords"
+echo -e "3. Verify mailbox content"
 echo -e "4. Test distribution list email delivery"
 echo -e "${GREEN}========================================================${NC}\n"
 
