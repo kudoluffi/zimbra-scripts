@@ -1,9 +1,9 @@
 #!/bin/bash
-# zimbra-restore.sh v1.9
-# FINAL: Fixed mailbox restore (postRestURL) + preferences value extraction
-# Usage: sudo bash zirma-restore.sh --mode MODES [FILTERS] BACKUP_DATE
+# zimbra-restore.sh v2.0
+# FINAL: Fixed postRestURL syntax + AWK variable issue + simpler preferences
+# Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
-set -u
+set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -41,7 +41,11 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     *)
-      [ -z "$BACKUP_DATE" ] && BACKUP_DATE="$1" || err "Unknown: $1"
+      if [ -z "$BACKUP_DATE" ]; then
+        BACKUP_DATE="$1"
+      else
+        err "Unknown option or duplicate date: $1"
+      fi
       shift
       ;;
   esac
@@ -57,8 +61,12 @@ done
 get_backup_domain() {
   local domain_file="$BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt"
   if [ -f "$domain_file" ] && [ -s "$domain_file" ]; then
-    local domain=$(grep -v '^$' "$domain_file" | head -1 | tr -d '[:space:]')
-    [ -n "$domain" ] && echo "$domain" | grep -q '\.' && { echo "$domain"; return 0; }
+    local domain
+    domain=$(grep -v '^$' "$domain_file" | head -1 | tr -d '[:space:]')
+    if [ -n "$domain" ] && echo "$domain" | grep -q '\.'; then
+      echo "$domain"
+      return 0
+    fi
   fi
   hostname -d 2>/dev/null || echo "newbienotes.my.id"
 }
@@ -66,7 +74,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Restore Script v1.9${NC}"
+echo -e "${GREEN}  Zimbra Restore Script v2.0${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -88,37 +96,50 @@ mailbox_filename_to_account() {
 # ─────────────────────────────────────────────────────────────────────────────
 get_account_status() {
   local acc="$1"
-  local safe=$(echo "$acc" | tr '@' '_')
+  local safe
+  safe=$(echo "$acc" | tr '@' '_')
   local pref="$BACKUP_ROOT/mailboxes/$BACKUP_DATE/${safe}-preferences.txt"
-  [ -f "$pref" ] && grep "^zimbraAccountStatus:" "$pref" 2>/dev/null | awk '{print $2}' || echo "active"
+  if [ -f "$pref" ]; then
+    grep "^zimbraAccountStatus:" "$pref" 2>/dev/null | awk '{print $2}' || echo "active"
+  else
+    echo "active"
+  fi
 }
 
 should_restore() {
   local acc="$1"
-  [ -n "$SINGLE_USER" ] && { [ "$acc" = "$SINGLE_USER" ]; return $?; }
-  [ "$STATUS_FILTER" = "all" ] && return 0
-  local status=$(get_account_status "$acc")
-  [ -n "$STATUS_FILTER" ] && { echo ",$STATUS_FILTER," | grep -q ",$status,"; return $?; }
+  if [ -n "${SINGLE_USER:-}" ]; then
+    [ "$acc" = "$SINGLE_USER" ] && return 0 || return 1
+  fi
+  if [ "${STATUS_FILTER:-}" = "all" ]; then
+    return 0
+  fi
+  local status
+  status=$(get_account_status "$acc")
+  if [ -n "${STATUS_FILTER:-}" ]; then
+    echo ",$STATUS_FILTER," | grep -q ",$status," && return 0
+    log "   Skipping $acc (status: $status)"
+    return 1
+  fi
   echo ",$DEFAULT_STATUS," | grep -q ",$status,"
 }
 
 account_exists() {
-  su - $ZIMBRA_USER -c "zmprov ga '$1' &>/dev/null" 2>/dev/null
+  su - "$ZIMBRA_USER" -c "zmprov ga '$1' &>/dev/null" 2>/dev/null || return 1
 }
 
 create_account() {
   local acc="$1" pwd="$2"
   log "   Creating: $acc"
-  su - $ZIMBRA_USER -c "zmprov ca '$acc' '$pwd'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null
+  su - "$ZIMBRA_USER" -c "zmprov ca '$acc' '$pwd'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null || return 1
 }
 
-# Extract attribute value from preferences file (handle multi-line)
-get_pref_value() {
+# Simple value extractor (single-line values only, but handles most cases)
+get_pref_value_simple() {
   local file="$1"
   local attr="$2"
-  # Use zmprov ga to get current value from backup preferences (more reliable than grep)
-  # But since we can't query backup file directly, use awk for multi-line
-  awk -v attr="$attr:" '$0 ~ "^"attr {found=1; sub(/^'"$attr"': */, ""); printf "%s", $0; next} found && /^[a-zA-Z]/ {exit} found {printf " %s", $0}' "$file" 2>/dev/null | sed 's/^ *//;s/ *$//'
+  # Get the line starting with "attr:" and extract value after first colon
+  grep "^${attr}:" "$file" 2>/dev/null | head -1 | sed "s/^${attr}:[[:space:]]*//" || true
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -127,45 +148,63 @@ get_pref_value() {
 restore_passwords() {
   log "Restoring passwords..."
   local dir="$BACKUP_ROOT/passwords/$BACKUP_DATE"
-  [ ! -d "$dir" ] && { warn "   Not found"; return 1; }
+  if [ ! -d "$dir" ]; then
+    warn "   Not found"
+    return 1
+  fi
   
   local ok=0 fail=0
   for f in "$dir"/*.shadow; do
     [ -f "$f" ] || continue
-    local fn=$(basename "$f" .shadow)
-    local acc=$(password_filename_to_account "$fn")
+    local fn
+    fn=$(basename "$f" .shadow)
+    local acc
+    acc=$(password_filename_to_account "$fn")
     
     should_restore "$acc" || continue
     account_exists "$acc" || create_account "$acc" "TempRestore123!"
     
-    local hash=$(cat "$f")
+    local hash
+    hash=$(cat "$f")
     if [ -n "$hash" ]; then
       log "   Setting password: $acc"
-      su - $ZIMBRA_USER -c "zmprov ma '$acc' userPassword '$hash'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null
-      [ $? -eq 0 ] && { ok=$((ok+1)); pass "      ✓ $acc"; } || { fail=$((fail+1)); fail "      ✗ $acc"; }
+      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' userPassword '$hash'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null; then
+        ok=$((ok+1)); pass "      ✓ $acc"
+      else
+        fail=$((fail+1)); fail "      ✗ $acc"
+      fi
     fi
   done
   echo ""; pass "   Passwords: $ok ok, $fail fail"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: MAILBOXES (FIXED: Use postRestURL for OSE)
+# RESTORE: MAILBOXES (FIXED: Correct postRestURL syntax)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_mailboxes() {
   log "Restoring mailboxes (OSE mode: postRestURL)..."
   local dir="$BACKUP_ROOT/mailboxes/$BACKUP_DATE"
-  [ ! -d "$dir" ] && { warn "   Not found"; return 1; }
+  if [ ! -d "$dir" ]; then
+    warn "   Not found"
+    return 1
+  fi
   
   shopt -s nullglob
   local files=("$dir"/*.tgz)
   shopt -u nullglob
   log "   Found ${#files[@]} backup file(s)"
-  [ ${#files[@]} -eq 0 ] && { warn "   No .tgz files!"; ls "$dir/"; return 1; }
+  if [ ${#files[@]} -eq 0 ]; then
+    warn "   No .tgz files!"
+    ls "$dir/"
+    return 1
+  fi
   
   local ok=0 fail=0
   for f in "${files[@]}"; do
-    local fn=$(basename "$f" .tgz)
-    local acc=$(mailbox_filename_to_account "$fn")
+    local fn
+    fn=$(basename "$f" .tgz)
+    local acc
+    acc=$(mailbox_filename_to_account "$fn")
     
     log "   Processing: $fn → $acc"
     echo "$acc" | grep -q "@" || { warn "   Invalid: $acc"; continue; }
@@ -175,37 +214,41 @@ restore_mailboxes() {
     
     log "   Restoring mailbox: $acc"
     
-    # FIX: Use zmmailbox postRestURL for OSE TGZ imports
-    # Format: zmmailbox -z -m user@domain postRestURL '//?fmt=tgz&resolve=skip' < backup.tgz
-    local restore_output=$(su - $ZIMBRA_USER -c "zmmailbox -z -m '$acc' postRestURL '//?fmt=tgz&resolve=skip' < '$f'" 2>&1)
-    local restore_status=$?
-    
+    # FIX: Correct postRestURL syntax (file as argument, not redirection)
+    # Syntax: zmmailbox -z -m user@domain postRestURL [opts] {relative-path} {file-name}
+    local restore_output
+    restore_output=$(su - "$ZIMBRA_USER" -c "zmmailbox -z -m '$acc' postRestURL '/?fmt=tgz&resolve=skip' '$f'" 2>&1) || true
     echo "$restore_output" >> /tmp/zimbra-restore.log
     
-    # Check for success indicators
-    if [ $restore_status -eq 0 ] && ! echo "$restore_output" | grep -qi "error\|fail\|exception"; then
-      ok=$((ok+1)); pass "      ✓ $acc"
-    else
+    # Check for success (no "usage:" or "error" in output)
+    if echo "$restore_output" | grep -qi "usage:\|error\|exception\|fail"; then
       fail=$((fail+1)); fail "      ✗ $acc"
-      log "   Error output: $(echo "$restore_output" | head -3)"
+      log "   Error: $(echo "$restore_output" | head -2)"
+    else
+      ok=$((ok+1)); pass "      ✓ $acc"
     fi
   done
   echo ""; pass "   Mailboxes: $ok ok, $fail fail"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: PREFERENCES (FIXED: Better value extraction)
+# RESTORE: PREFERENCES (FIXED: Simple extraction + no set -u conflict)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Restoring user preferences (signatures, forwarding, status)..."
   local dir="$BACKUP_ROOT/mailboxes/$BACKUP_DATE"
-  [ ! -d "$dir" ] && { warn "   Not found"; return 1; }
+  if [ ! -d "$dir" ]; then
+    warn "   Not found"
+    return 1
+  fi
   
   local ok=0 fail=0
   for pref_file in "$dir"/*-preferences.txt; do
     [ -f "$pref_file" ] || continue
-    local fn=$(basename "$pref_file" -preferences.txt)
-    local acc=$(mailbox_filename_to_account "$fn")
+    local fn
+    fn=$(basename "$pref_file" -preferences.txt)
+    local acc
+    acc=$(mailbox_filename_to_account "$fn")
     
     echo "$acc" | grep -q "@" || continue
     should_restore "$acc" || continue
@@ -213,39 +256,35 @@ restore_preferences() {
     
     log "   Restoring preferences: $acc"
     
-    local applied=0 failed_attrs=""
+    local applied=0
+    local failed_list=""
     
-    # Attributes to restore (in order)
-    for attr in "zimbraAccountStatus" "zimbraPrefMailForwardingAddress" "zimbraPrefSignature"; do
-      # Extract value using awk (handles multi-line values)
-      local value=$(awk -v a="$attr:" '
-        $0 ~ "^"a { 
-          found=1; 
-          sub(/^'"$a"': */, ""); 
-          printf "%s", $0; 
-          next 
-        } 
-        found && /^[a-zA-Z]/ {exit} 
-        found {printf " %s", $0}
-      ' "$pref_file" 2>/dev/null | sed 's/^ *//;s/ *$//')
+    # Attributes to restore (simple, single-line values)
+    for ATTR in "zimbraAccountStatus" "zimbraPrefMailForwardingAddress" "zimbraPrefSignature"; do
+      # Extract value using simple grep+sed (handles most cases)
+      local value
+      value=$(get_pref_value_simple "$pref_file" "$ATTR")
       
-      if [ -n "$value" ] && [ "$value" != "$attr" ]; then
-        # Escape single quotes in value for safe command execution
-        local escaped_value=$(echo "$value" | sed "s/'/\\\\'/g")
+      if [ -n "$value" ] && [ "$value" != "$ATTR" ]; then
+        # Escape single quotes for safe command execution
+        local escaped_value
+        escaped_value=$(printf '%s' "$value" | sed "s/'/\\\\'/g")
         
-        log "     Setting $attr"
-        if su - $ZIMBRA_USER -c "zmprov ma '$acc' '$attr' '$escaped_value'" 2>/dev/null; then
+        log "     Setting $ATTR"
+        if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$ATTR' '$escaped_value'" 2>/dev/null; then
           applied=$((applied+1))
         else
-          failed_attrs="$failed_attrs $attr"
+          failed_list="${failed_list}${ATTR},"
         fi
       fi
     done
     
-    if [ $applied -gt 0 ]; then
+    if [ "$applied" -gt 0 ]; then
       ok=$((ok+1))
       local msg="✓ $acc ($applied settings)"
-      [ -n "$failed_attrs" ] && msg="$msg, failed:$failed_attrs"
+      if [ -n "$failed_list" ]; then
+        msg="${msg}, failed:$(echo "$failed_list" | sed 's/,$//')"
+      fi
       pass "      $msg"
     else
       fail=$((fail+1)); warn "      ✗ $acc (no settings applied)"
@@ -260,18 +299,23 @@ restore_preferences() {
 restore_dls() {
   log "Restoring distribution lists..."
   local dl_file="$BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt"
-  [ ! -f "$dl_file" ] && { warn "   Not found"; return 1; }
+  if [ ! -f "$dl_file" ]; then
+    warn "   Not found"
+    return 1
+  fi
   
-  local count=$(wc -l < "$dl_file")
+  local count
+  count=$(wc -l < "$dl_file")
   log "   Found $count DL(s)"
   
   local dl_ok=0 member_ok=0
   while IFS= read -r dl; do
     [ -z "$dl" ] && continue
     log "   Restoring DL: $dl"
-    su - $ZIMBRA_USER -c "zmprov cdl '$dl'" 2>/dev/null || true
+    su - "$ZIMBRA_USER" -c "zmprov cdl '$dl'" 2>/dev/null || true
     
-    local dl_safe=$(echo "$dl" | tr '@' '_' | tr '.' '_')
+    local dl_safe
+    dl_safe=$(echo "$dl" | tr '@' '_' | tr '.' '_')
     local member_file="$BACKUP_ROOT/distribution-lists/dl-members-${dl_safe}-${BACKUP_DATE}.txt"
     
     if [ -f "$member_file" ]; then
@@ -283,7 +327,7 @@ restore_dls() {
         echo "$member" | grep -qE "^[^@]+@[^@]+\.[^@]+$" || continue
         
         if account_exists "$member"; then
-          su - $ZIMBRA_USER -c "zmprov adlm '$dl' '$member'" 2>/dev/null && m_ok=$((m_ok+1))
+          su - "$ZIMBRA_USER" -c "zmprov adlm '$dl' '$member'" 2>/dev/null && m_ok=$((m_ok+1))
         else
           log "      ⚠ Member not found: $member"
         fi
@@ -316,6 +360,6 @@ echo -e "${GREEN}========================================================${NC}"
 echo -e "Log: /tmp/zimbra-restore.log"
 echo -e "${YELLOW}Verify:${NC}"
 echo -e "  su - zimbra -c 'zmprov gaa | grep $DOMAIN'"
-echo -e "  su - zimbra -c 'zmmailbox -z -m user@$DOMAIN getRestURL \"//?query=*&fmt=tsv\"'"
+echo -e "  su - zimbra -c 'zmmailbox -z -m user@$DOMAIN getFolder /'"
 echo -e "  su - zimbra -c 'zmprov gdlm officer@$DOMAIN'"
 echo -e "${GREEN}========================================================${NC}\n"
