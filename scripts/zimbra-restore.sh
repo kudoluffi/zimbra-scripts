@@ -254,7 +254,7 @@ restore_mailboxes() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: PREFERENCES (FIXED: Multi-line value support)
+# RESTORE: PREFERENCES (FIXED: Proper signature sequence)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Restoring user preferences (signatures, filters, forwarding, status)..."
@@ -281,33 +281,129 @@ restore_preferences() {
     local applied=0
     local failed_list=""
     
-    # Attributes to restore
-    for ATTR in "zimbraAccountStatus" "zimbraPrefMailForwardingAddress" "zimbraSignatureName" "zimbraPrefMailSignatureHTML" "zimbraPrefDefaultSignatureId" "zimbraPrefForwardReplySignatureId"; do
-      # Extract value using multi-line aware function
-      local value
-      value=$(get_pref_value_multiline "$pref_file" "$ATTR")
+    # ───────────────────────────────────────────────────────────────────────
+    # 1. Restore Account Status
+    # ───────────────────────────────────────────────────────────────────────
+    local value
+    value=$(get_pref_value_multiline "$pref_file" "zimbraAccountStatus")
+    if [ -n "$value" ] && [ "$value" != "zimbraAccountStatus" ]; then
+      log "     Setting zimbraAccountStatus: $value"
+      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraAccountStatus '$value'" 2>/dev/null; then
+        applied=$((applied+1))
+        log "     ✓ Applied zimbraAccountStatus"
+      else
+        failed_list="${failed_list}zimbraAccountStatus,"
+        log "     ✗ Failed zimbraAccountStatus"
+      fi
+    fi
+    
+    # ───────────────────────────────────────────────────────────────────────
+    # 2. Restore Signature (if exists)
+    # ───────────────────────────────────────────────────────────────────────
+    local sig_name sig_html
+    sig_name=$(get_pref_value_multiline "$pref_file" "zimbraSignatureName")
+    sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML")
+    
+    if [ -n "$sig_name" ] && [ -n "$sig_html" ]; then
+      log "     Restoring signature: $sig_name"
       
-      # Debug: show what we extracted
-      if [ -n "$value" ] && [ "$value" != "$ATTR" ]; then
-        log "     Found $ATTR: $(echo "$value" | head -c 100)..."
+      # Step 1: Set signature name
+      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraSignatureName '$sig_name'" 2>/dev/null; then
+        log "     ✓ Set signature name"
         
-        # Escape single quotes for safe command execution
-        local escaped_value
-        escaped_value=$(printf '%s' "$value" | sed "s/'/\\\\'/g")
+        # Step 2: Get signature ID (auto-generated)
+        local sig_id
+        sig_id=$(su - "$ZIMBRA_USER" -c "zmprov ga '$acc' zimbraSignatureId" 2>/dev/null | grep "zimbraSignatureId:" | awk '{print $2}' | head -1)
         
-        log "     Setting $ATTR"
-        if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$ATTR' '$escaped_value'" 2>/dev/null; then
-          applied=$((applied+1))
-          log "     ✓ Applied $ATTR"
+        if [ -n "$sig_id" ]; then
+          log "     ✓ Got signature ID: $sig_id"
+          
+          # Step 3: Set HTML content
+          # Escape special characters for shell
+          local escaped_html
+          escaped_html=$(printf '%s' "$sig_html" | sed "s/'/\\\\'/g" | tr '\n' ' ')
+          
+          if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraPrefMailSignatureHTML '$escaped_html'" 2>/dev/null; then
+            log "     ✓ Set signature HTML"
+            applied=$((applied+1))
+            
+            # Step 4: Set default signature ID
+            if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraPrefDefaultSignatureId '$sig_id'" 2>/dev/null; then
+              log "     ✓ Set default signature ID"
+              applied=$((applied+1))
+            else
+              log "     ⚠ Could not set default signature ID"
+            fi
+            
+            # Step 5: Set forward/reply signature ID
+            if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraPrefForwardReplySignatureId '$sig_id'" 2>/dev/null; then
+              log "     ✓ Set forward/reply signature ID"
+              applied=$((applied+1))
+            else
+              log "     ⚠ Could not set forward/reply signature ID"
+            fi
+          else
+            log "     ✗ Failed to set signature HTML"
+            failed_list="${failed_list}signature,"
+          fi
         else
-          failed_list="${failed_list}${ATTR},"
-          log "     ✗ Failed to apply $ATTR"
+          log "     ✗ Could not get signature ID"
+          failed_list="${failed_list}signature_id,"
         fi
       else
-        log "     ⚠ $ATTR not found or empty in backup"
+        log "     ✗ Failed to set signature name"
+        failed_list="${failed_list}signature_name,"
       fi
-    done
+    elif [ -n "$sig_name" ]; then
+      log "     ⚠ Signature name found but no HTML content"
+    fi
     
+    # ───────────────────────────────────────────────────────────────────────
+    # 3. Restore Forwarding Address
+    # ───────────────────────────────────────────────────────────────────────
+    local fwd_addr
+    fwd_addr=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailForwardingAddress")
+    if [ -n "$fwd_addr" ] && [ "$fwd_addr" != "zimbraPrefMailForwardingAddress" ]; then
+      log "     Setting forwarding: $fwd_addr"
+      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraPrefMailForwardingAddress '$fwd_addr'" 2>/dev/null; then
+        applied=$((applied+1))
+        log "     ✓ Applied forwarding"
+      else
+        failed_list="${failed_list}forwarding,"
+        log "     ✗ Failed forwarding"
+      fi
+    fi
+    
+    # ───────────────────────────────────────────────────────────────────────
+    # 4. Restore Filters (Sieve Script) - WITH VALIDATION
+    # ───────────────────────────────────────────────────────────────────────
+    local sieve_script
+    sieve_script=$(get_pref_value_multiline "$pref_file" "zimbraMailSieveScript")
+    if [ -n "$sieve_script" ] && [ "$sieve_script" != "zimbraMailSieveScript" ]; then
+      log "     Restoring filters (Sieve script)..."
+      
+      # Validate Sieve script syntax first (basic check)
+      if echo "$sieve_script" | grep -q "^require"; then
+        # Escape for shell
+        local escaped_sieve
+        escaped_sieve=$(printf '%s' "$sieve_script" | sed "s/'/\\\\'/g")
+        
+        # Try to apply
+        if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraMailSieveScript '$escaped_sieve'" 2>/dev/null; then
+          applied=$((applied+1))
+          log "     ✓ Applied Sieve script"
+        else
+          log "     ✗ Failed to apply Sieve script (syntax error?)"
+          log "     ⚠ Skipping filters to avoid breaking account"
+          failed_list="${failed_list}filters,"
+        fi
+      else
+        log "     ⚠ Invalid Sieve script (missing 'require' statement)"
+        log "     ⚠ Skipping filters"
+      fi
+    fi
+    
+    # Summary
     if [ "$applied" -gt 0 ]; then
       ok=$((ok+1))
       local msg="✓ $acc ($applied settings)"
