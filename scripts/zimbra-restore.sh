@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v3.13
-# FINAL: Complete Signature Restore Logic (Name -> HTML -> Get New ID -> Set Default IDs)
+# zimbra-restore.sh v3.14
+# FINAL: Fixed Signature ID extraction using grep
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -72,7 +72,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.13${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.14${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -163,15 +163,6 @@ set_zimbra_attr() {
   local attr="$2"
   local value="$3"
   timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$attr' '$value'" 2>/dev/null
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GET ATTRIBUTE
-# ─────────────────────────────────────────────────────────────────────────────
-get_zimbra_attr() {
-  local acc="$1"
-  local attr="$2"
-  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ga '$acc' '$attr'" 2>/dev/null | grep "^${attr}:" | sed "s/^${attr}:[[:space:]]*//" | head -1 || true
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,7 +265,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3: RESTORE PREFERENCES (COMPLETE SIGNATURE LOGIC)
+# STEP 3: RESTORE PREFERENCES (FIXED: Signature ID Extraction)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Step 3: Restoring preferences..."
@@ -295,7 +286,7 @@ restore_preferences() {
     local failed_list=""
     
     # ───────────────────────────────────────────────────────────────────────
-    # COMPLETE SIGNATURE RESTORE (Exact logic from your reference script)
+    # COMPLETE SIGNATURE RESTORE
     # ───────────────────────────────────────────────────────────────────────
     local sig_name sig_html
     sig_name=$(get_pref_value "$pref_file" "zimbraSignatureName")
@@ -324,7 +315,6 @@ restore_preferences() {
       
       if set_signature_html_base64 "$acc" "$temp_html"; then
         log "     ✓ Set signature HTML"
-        # Signature is now fully created, Zimbra has generated a new ID
       else
         log "     ✗ Failed to set signature HTML"
         failed_list="${failed_list}signature_html,"
@@ -333,24 +323,13 @@ restore_preferences() {
     fi
     
     # Step 3: GET the newly generated Signature ID from Zimbra
-    # This is the critical step you pointed out!
     if [ "$signature_restored" = "true" ]; then
       log "     Getting auto-generated Signature ID..."
       
-      # Create temp file for ID
-      local temp_id_file="/tmp/firmaid_${fn}.txt"
-      
       # Run zmprov ga to get zimbraSignatureId
-      su - "$ZIMBRA_USER" -c "zmprov ga '$acc' zimbraSignatureId" > "$temp_id_file" 2>/dev/null
-      
-      # Extract ID (remove header line and attribute name)
-      # Format of file:
-      # # name user@domain.com
-      # zimbraSignatureId: uuid-here
+      # Use grep to find the line, then sed to extract value
       local firmaid
-      firmaid=$(sed -n '2p' "$temp_id_file" | sed 's/zimbraSignatureId:[[:space:]]*//')
-      
-      rm -f "$temp_id_file"
+      firmaid=$(su - "$ZIMBRA_USER" -c "zmprov ga '$acc' zimbraSignatureId" 2>/dev/null | grep "zimbraSignatureId:" | sed "s/zimbraSignatureId:[[:space:]]*//")
       
       if [ -n "$firmaid" ]; then
         log "     ✓ Got new Signature ID: $firmaid"
