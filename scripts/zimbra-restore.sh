@@ -1,6 +1,6 @@
 #!/bin/bash
 # zimbra-restore.sh v2.2
-# FINAL: Fixed multi-line preference value extraction
+# FINAL: Fixed value extraction + proper signature sequence + Sieve validation
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -euo pipefail
@@ -135,122 +135,31 @@ create_account() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIXED: Multi-line value extractor using awk
+# FIXED: Multi-line value extractor (FIXED: Remove extra colon/space)
 # ─────────────────────────────────────────────────────────────────────────────
 get_pref_value_multiline() {
   local file="$1"
   local attr="$2"
   
   # AWK script to extract multi-line values:
-  # - Find line starting with "attr:"
-  # - Print value after first colon
-  # - Continue printing subsequent lines until next attribute (line starting with word+:)
   awk -v ATTR="$attr:" '
-    BEGIN { found=0; first=1 }
+    BEGIN { found=0 }
     $0 ~ "^"ATTR {
       found=1
-      first=1
-      # Remove "attr: " prefix and print rest of line
+      # Remove "attr: " prefix (with colon and space)
       sub(/^'"$ATTR"'[[:space:]]*/, "")
       if (length($0) > 0) printf "%s", $0
       next
     }
     found {
-      # If line starts with a new attribute (word followed by colon), stop
+      # If line starts with a new attribute, stop
       if ($0 ~ /^[a-zA-Z][a-zA-Z0-9_-]*:/) {
         exit
       }
-      # Otherwise, this is continuation of value - print with space
-      if (!first) printf " %s", $0
-      else { printf "%s", $0; first=0 }
+      # Otherwise, this is continuation - print with space
+      printf " %s", $0
     }
-  ' "$file" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: PASSWORDS
-# ─────────────────────────────────────────────────────────────────────────────
-restore_passwords() {
-  log "Restoring passwords..."
-  local dir="$BACKUP_ROOT/passwords/$BACKUP_DATE"
-  if [ ! -d "$dir" ]; then
-    warn "   Not found"
-    return 1
-  fi
-  
-  local ok=0 fail=0
-  for f in "$dir"/*.shadow; do
-    [ -f "$f" ] || continue
-    local fn
-    fn=$(basename "$f" .shadow)
-    local acc
-    acc=$(password_filename_to_account "$fn")
-    
-    should_restore "$acc" || continue
-    account_exists "$acc" || create_account "$acc" "TempRestore123!"
-    
-    local hash
-    hash=$(cat "$f")
-    if [ -n "$hash" ]; then
-      log "   Setting password: $acc"
-      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' userPassword '$hash'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null; then
-        ok=$((ok+1)); pass "      ✓ $acc"
-      else
-        fail=$((fail+1)); fail "      ✗ $acc"
-      fi
-    fi
-  done
-  echo ""; pass "   Passwords: $ok ok, $fail fail"
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: MAILBOXES
-# ─────────────────────────────────────────────────────────────────────────────
-restore_mailboxes() {
-  log "Restoring mailboxes (OSE mode: postRestURL)..."
-  local dir="$BACKUP_ROOT/mailboxes/$BACKUP_DATE"
-  if [ ! -d "$dir" ]; then
-    warn "   Not found"
-    return 1
-  fi
-  
-  shopt -s nullglob
-  local files=("$dir"/*.tgz)
-  shopt -u nullglob
-  log "   Found ${#files[@]} backup file(s)"
-  if [ ${#files[@]} -eq 0 ]; then
-    warn "   No .tgz files!"
-    ls "$dir/"
-    return 1
-  fi
-  
-  local ok=0 fail=0
-  for f in "${files[@]}"; do
-    local fn
-    fn=$(basename "$f" .tgz)
-    local acc
-    acc=$(mailbox_filename_to_account "$fn")
-    
-    log "   Processing: $fn → $acc"
-    echo "$acc" | grep -q "@" || { warn "   Invalid: $acc"; continue; }
-    should_restore "$acc" || continue
-    
-    account_exists "$acc" || create_account "$acc" "TempRestore123!"
-    
-    log "   Restoring mailbox: $acc"
-    
-    local restore_output
-    restore_output=$(su - "$ZIMBRA_USER" -c "zmmailbox -z -m '$acc' postRestURL '/?fmt=tgz&resolve=skip' '$f'" 2>&1) || true
-    echo "$restore_output" >> /tmp/zimbra-restore.log
-    
-    if echo "$restore_output" | grep -qi "usage:\|error\|exception\|fail"; then
-      fail=$((fail+1)); fail "      ✗ $acc"
-      log "   Error: $(echo "$restore_output" | head -2)"
-    else
-      ok=$((ok+1)); pass "      ✓ $acc"
-    fi
-  done
-  echo ""; pass "   Mailboxes: $ok ok, $fail fail"
+  ' "$file" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | head -c 10000
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -419,7 +328,93 @@ restore_preferences() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: DISTRIBUTION LISTS
+# RESTORE: MAILBOXES (keep from v2.1)
+# ─────────────────────────────────────────────────────────────────────────────
+restore_mailboxes() {
+  log "Restoring mailboxes (OSE mode: postRestURL)..."
+  local dir="$BACKUP_ROOT/mailboxes/$BACKUP_DATE"
+  if [ ! -d "$dir" ]; then
+    warn "   Not found"
+    return 1
+  fi
+  
+  shopt -s nullglob
+  local files=("$dir"/*.tgz)
+  shopt -u nullglob
+  log "   Found ${#files[@]} backup file(s)"
+  if [ ${#files[@]} -eq 0 ]; then
+    warn "   No .tgz files!"
+    ls "$dir/"
+    return 1
+  fi
+  
+  local ok=0 fail=0
+  for f in "${files[@]}"; do
+    local fn
+    fn=$(basename "$f" .tgz)
+    local acc
+    acc=$(mailbox_filename_to_account "$fn")
+    
+    log "   Processing: $fn → $acc"
+    echo "$acc" | grep -q "@" || { warn "   Invalid: $acc"; continue; }
+    should_restore "$acc" || continue
+    
+    account_exists "$acc" || create_account "$acc" "TempRestore123!"
+    
+    log "   Restoring mailbox: $acc"
+    
+    local restore_output
+    restore_output=$(su - "$ZIMBRA_USER" -c "zmmailbox -z -m '$acc' postRestURL '/?fmt=tgz&resolve=skip' '$f'" 2>&1) || true
+    echo "$restore_output" >> /tmp/zimbra-restore.log
+    
+    if echo "$restore_output" | grep -qi "usage:\|error\|exception\|fail"; then
+      fail=$((fail+1)); fail "      ✗ $acc"
+      log "   Error: $(echo "$restore_output" | head -2)"
+    else
+      ok=$((ok+1)); pass "      ✓ $acc"
+    fi
+  done
+  echo ""; pass "   Mailboxes: $ok ok, $fail fail"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESTORE: PASSWORDS (keep from v2.1)
+# ─────────────────────────────────────────────────────────────────────────────
+restore_passwords() {
+  log "Restoring passwords..."
+  local dir="$BACKUP_ROOT/passwords/$BACKUP_DATE"
+  if [ ! -d "$dir" ]; then
+    warn "   Not found"
+    return 1
+  fi
+  
+  local ok=0 fail=0
+  for f in "$dir"/*.shadow; do
+    [ -f "$f" ] || continue
+    local fn
+    fn=$(basename "$f" .shadow)
+    local acc
+    acc=$(password_filename_to_account "$fn")
+    
+    should_restore "$acc" || continue
+    account_exists "$acc" || create_account "$acc" "TempRestore123!"
+    
+    local hash
+    hash=$(cat "$f")
+    if [ -n "$hash" ]; then
+      log "   Setting password: $acc"
+      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' userPassword '$hash'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null; then
+        ok=$((ok+1)); pass "      ✓ $acc"
+      else
+        fail=$((fail+1)); fail "      ✗ $acc"
+      fi
+    fi
+  done
+  echo ""; pass "   Passwords: $ok ok, $fail fail"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESTORE: DISTRIBUTION LISTS (keep from v2.1)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_dls() {
   log "Restoring distribution lists..."
@@ -484,7 +479,6 @@ echo -e "${GREEN}  RESTORE COMPLETED${NC}"
 echo -e "${GREEN}========================================================${NC}"
 echo -e "Log: /tmp/zimbra-restore.log"
 echo -e "${YELLOW}Verify:${NC}"
-echo -e "  su - zimbra -c 'zmprov gaa | grep $DOMAIN'"
-echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefSignature'"
-echo -e "  su - zimbra -c 'zmprov gdlm officer@$DOMAIN'"
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML'"
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraMailSieveScript' | head -5"
 echo -e "${GREEN}========================================================${NC}\n"
