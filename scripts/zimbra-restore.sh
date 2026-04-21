@@ -1,5 +1,5 @@
 #!/bin/bash
-# zimbra-restore.sh v2.1
+# zimbra-restore.sh v2.2
 # FINAL: Fixed multi-line preference value extraction
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
@@ -74,7 +74,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Restore Script v2.1${NC}"
+echo -e "${GREEN}  Zimbra Restore Script v2.2${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
