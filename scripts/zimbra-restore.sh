@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v2.5
-# FINAL: Fixed status filter for all modes + signature HTML extraction
+# zimbra-restore.sh v2.6
+# FINAL: Fixed value extraction (proper sed) + status filter working
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -75,7 +75,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Restore Script v2.5${NC}"
+echo -e "${GREEN}  Zimbra Restore Script v2.6${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -98,23 +98,35 @@ pref_filename_to_account() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
+# FIXED: Simple value extractor using grep + sed (NO AWK)
 # ─────────────────────────────────────────────────────────────────────────────
+get_pref_value() {
+  local file="$1"
+  local attr="$2"
+  
+  # Find line starting with "attr:" and extract everything after first colon+space
+  grep "^${attr}:" "$file" 2>/dev/null | head -1 | sed "s/^${attr}:[[:space:]]*//" || true
+}
 
-# Get account status from preferences file
+# ─────────────────────────────────────────────────────────────────────────────
+# Get account status from backup preferences
+# ─────────────────────────────────────────────────────────────────────────────
 get_account_status_from_backup() {
   local acc="$1"
   local safe
   safe=$(echo "$acc" | tr '@' '_')
   local pref="$BACKUP_ROOT/mailboxes/$BACKUP_DATE/${safe}-preferences.txt"
+  
   if [ -f "$pref" ]; then
-    grep "^zimbraAccountStatus:" "$pref" 2>/dev/null | head -1 | sed 's/^zimbraAccountStatus:[[:space:]]*//' | sed 's/[[:space:]]*$//' || echo "active"
+    get_pref_value "$pref" "zimbraAccountStatus" || echo "active"
   else
     echo "active"
   fi
 }
 
-# Check if account should be restored (check status from backup preferences)
+# ─────────────────────────────────────────────────────────────────────────────
+# Check if account should be restored
+# ─────────────────────────────────────────────────────────────────────────────
 should_restore() {
   local acc="$1"
   
@@ -128,16 +140,19 @@ should_restore() {
     return 0
   fi
   
-  # Get status from backup preferences file
+  # Get status from backup
   local status
   status=$(get_account_status_from_backup "$acc")
+  
+  # Debug log
+  log "   Account $acc has status '$status' in backup"
   
   # If specific status filter, check match
   if [ -n "${STATUS_FILTER:-}" ]; then
     if echo ",$STATUS_FILTER," | grep -q ",$status,"; then
       return 0
     else
-      log "   Skipping $acc (status in backup: $status, filter: $STATUS_FILTER)"
+      log "   Skipping $acc (status: $status, filter: $STATUS_FILTER)"
       return 1
     fi
   fi
@@ -146,7 +161,7 @@ should_restore() {
   if echo ",$DEFAULT_STATUS," | grep -q ",$status,"; then
     return 0
   else
-    log "   Skipping $acc (status in backup: $status)"
+    log "   Skipping $acc (status: $status)"
     return 1
   fi
 }
@@ -161,14 +176,12 @@ create_account() {
   timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ca '$acc' '$pwd'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null || return 1
 }
 
-# Get attribute with timeout
 get_zimbra_attr() {
   local acc="$1"
   local attr="$2"
-  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ga '$acc' '$attr'" 2>/dev/null | grep "^${attr}:" | awk '{print $2}' | head -1 || true
+  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ga '$acc' '$attr'" 2>/dev/null | grep "^${attr}:" | sed "s/^${attr}:[[:space:]]*//" | head -1 || true
 }
 
-# Set attribute with timeout
 set_zimbra_attr() {
   local acc="$1"
   local attr="$2"
@@ -177,30 +190,7 @@ set_zimbra_attr() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIXED: Multi-line value extractor (read until next attribute)
-# ─────────────────────────────────────────────────────────────────────────────
-get_pref_value_multiline() {
-  local file="$1"
-  local attr="$2"
-  
-  # Use awk to extract multi-line values properly
-  awk -v ATTR="$attr:" '
-    BEGIN { found=0 }
-    $0 ~ "^"ATTR {
-      found=1
-      sub(/^'"$ATTR"'[[:space:]]*/, "")
-      if (length($0) > 0) printf "%s", $0
-      next
-    }
-    found {
-      if ($0 ~ /^[a-zA-Z][a-zA-Z0-9_-]*:/) exit
-      printf " %s", $0
-    }
-  ' "$file" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | head -c 10000 || true
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: PASSWORDS (FIXED: Check status BEFORE restore)
+# RESTORE: PASSWORDS
 # ─────────────────────────────────────────────────────────────────────────────
 restore_passwords() {
   log "Restoring passwords..."
@@ -218,7 +208,7 @@ restore_passwords() {
     local acc
     acc=$(password_filename_to_account "$fn")
     
-    # FIX: Check status from backup BEFORE restoring
+    # Check status BEFORE restore
     should_restore "$acc" || continue
     
     account_exists "$acc" || create_account "$acc" "TempRestore123!"
@@ -238,7 +228,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: MAILBOXES (FIXED: Check status BEFORE restore)
+# RESTORE: MAILBOXES
 # ─────────────────────────────────────────────────────────────────────────────
 restore_mailboxes() {
   log "Restoring mailboxes (OSE mode: postRestURL)..."
@@ -268,7 +258,7 @@ restore_mailboxes() {
     log "   Processing: $fn → $acc"
     echo "$acc" | grep -q "@" || { warn "   Invalid: $acc"; continue; }
     
-    # FIX: Check status from backup BEFORE restoring
+    # Check status BEFORE restore
     should_restore "$acc" || continue
     
     account_exists "$acc" || create_account "$acc" "TempRestore123!"
@@ -290,7 +280,7 @@ restore_mailboxes() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: PREFERENCES (FIXED: Better HTML extraction)
+# RESTORE: PREFERENCES
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Restoring user preferences (signatures, filters, forwarding, status)..."
@@ -321,7 +311,7 @@ restore_preferences() {
     # 1. Restore Account Status
     # ───────────────────────────────────────────────────────────────────────
     local value
-    value=$(get_pref_value_multiline "$pref_file" "zimbraAccountStatus")
+    value=$(get_pref_value "$pref_file" "zimbraAccountStatus")
     if [ -n "$value" ] && [ "$value" != "zimbraAccountStatus" ]; then
       log "     Setting zimbraAccountStatus: $value"
       if set_zimbra_attr "$acc" "zimbraAccountStatus" "$value"; then
@@ -334,38 +324,29 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 2. Restore Signature (FIXED: Better HTML extraction)
+    # 2. Restore Signature
     # ───────────────────────────────────────────────────────────────────────
     local sig_name sig_html
-    sig_name=$(get_pref_value_multiline "$pref_file" "zimbraSignatureName")
-    sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML")
+    sig_name=$(get_pref_value "$pref_file" "zimbraSignatureName")
+    sig_html=$(get_pref_value "$pref_file" "zimbraPrefMailSignatureHTML")
     
-    # Debug: show what we extracted
-    if [ -n "$sig_name" ]; then
-      log "     Found signature name: $sig_name"
-    fi
-    if [ -n "$sig_html" ]; then
-      log "     Found signature HTML: $(echo "$sig_html" | head -c 100)..."
-    fi
+    # Debug
+    [ -n "$sig_name" ] && log "     Found signature name: $sig_name"
+    [ -n "$sig_html" ] && log "     Found signature HTML: $(echo "$sig_html" | head -c 100)..."
     
     if [ -n "$sig_name" ] && [ -n "$sig_html" ]; then
       log "     Restoring signature: $sig_name"
       
-      # Step 1: Set signature name
       if set_zimbra_attr "$acc" "zimbraSignatureName" "$sig_name"; then
         log "     ✓ Set signature name"
-        
-        # Small delay to let Zimbra index
         sleep 1
         
-        # Step 2: Get signature ID
         local sig_id
         sig_id=$(get_zimbra_attr "$acc" "zimbraSignatureId")
         
         if [ -n "$sig_id" ]; then
           log "     ✓ Got signature ID: $sig_id"
           
-          # Step 3: Set HTML content
           local escaped_html
           escaped_html=$(printf '%s' "$sig_html" | sed "s/'/\\\\'/g" | tr '\n' ' ' | head -c 5000)
           
@@ -374,30 +355,23 @@ restore_preferences() {
             log "     ✓ Set signature HTML"
             applied=$((applied+1))
             
-            # Step 4: Set default signature ID
             if set_zimbra_attr "$acc" "zimbraPrefDefaultSignatureId" "$sig_id"; then
               log "     ✓ Set default signature ID"
               applied=$((applied+1))
-            else
-              log "     ⚠ Could not set default signature ID"
             fi
             
-            # Step 5: Set forward/reply signature ID
             if set_zimbra_attr "$acc" "zimbraPrefForwardReplySignatureId" "$sig_id"; then
               log "     ✓ Set forward/reply signature ID"
               applied=$((applied+1))
-            else
-              log "     ⚠ Could not set forward/reply signature ID"
             fi
           else
-            log "     ✗ Failed to set signature HTML (value too long?)"
+            log "     ✗ Failed to set signature HTML"
             failed_list="${failed_list}signature_html,"
           fi
         else
-          log "     ✗ Could not get signature ID (timeout or not found)"
-          # Fallback: use ID from backup
+          log "     ✗ Could not get signature ID"
           local backup_sig_id
-          backup_sig_id=$(get_pref_value_multiline "$pref_file" "zimbraPrefDefaultSignatureId")
+          backup_sig_id=$(get_pref_value "$pref_file" "zimbraPrefDefaultSignatureId")
           if [ -n "$backup_sig_id" ] && [ "$backup_sig_id" != "zimbraPrefDefaultSignatureId" ]; then
             log "     ⚠ Using backup signature ID: $backup_sig_id"
             if set_zimbra_attr "$acc" "zimbraPrefDefaultSignatureId" "$backup_sig_id"; then
@@ -411,15 +385,13 @@ restore_preferences() {
         log "     ✗ Failed to set signature name"
         failed_list="${failed_list}signature_name,"
       fi
-    elif [ -n "$sig_name" ]; then
-      log "     ⚠ Signature name found but no HTML content in backup"
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 3. Restore Forwarding Address
+    # 3. Restore Forwarding
     # ───────────────────────────────────────────────────────────────────────
     local fwd_addr
-    fwd_addr=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailForwardingAddress")
+    fwd_addr=$(get_pref_value "$pref_file" "zimbraPrefMailForwardingAddress")
     if [ -n "$fwd_addr" ] && [ "$fwd_addr" != "zimbraPrefMailForwardingAddress" ]; then
       log "     Setting forwarding: $fwd_addr"
       if set_zimbra_attr "$acc" "zimbraPrefMailForwardingAddress" "$fwd_addr"; then
@@ -432,12 +404,12 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 4. Restore Filters (Sieve Script)
+    # 4. Restore Filters
     # ───────────────────────────────────────────────────────────────────────
     local sieve_script
-    sieve_script=$(get_pref_value_multiline "$pref_file" "zimbraMailSieveScript")
+    sieve_script=$(get_pref_value "$pref_file" "zimbraMailSieveScript")
     if [ -n "$sieve_script" ] && [ "$sieve_script" != "zimbraMailSieveScript" ]; then
-      log "     Restoring filters (Sieve script)..."
+      log "     Restoring filters..."
       
       if echo "$sieve_script" | grep -q "^require"; then
         local escaped_sieve
@@ -459,9 +431,7 @@ restore_preferences() {
     if [ "$applied" -gt 0 ]; then
       ok=$((ok+1))
       local msg="✓ $acc ($applied settings)"
-      if [ -n "$failed_list" ]; then
-        msg="${msg}, failed:$(echo "$failed_list" | sed 's/,$//')"
-      fi
+      [ -n "$failed_list" ] && msg="${msg}, failed:$(echo "$failed_list" | sed 's/,$//')"
       pass "      $msg"
     else
       fail=$((fail+1)); warn "      ✗ $acc (no settings applied)"
@@ -476,10 +446,7 @@ restore_preferences() {
 restore_dls() {
   log "Restoring distribution lists..."
   local dl_file="$BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt"
-  if [ ! -f "$dl_file" ]; then
-    warn "   Not found"
-    return 1
-  fi
+  [ ! -f "$dl_file" ] && { warn "   Not found"; return 1; }
   
   local count
   count=$(wc -l < "$dl_file")
@@ -536,6 +503,6 @@ echo -e "${GREEN}  RESTORE COMPLETED${NC}"
 echo -e "${GREEN}========================================================${NC}"
 echo -e "Log: /tmp/zimbra-restore.log"
 echo -e "${YELLOW}Verify:${NC}"
-echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML' | head -3"
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraAccountStatus'"
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML' | head -3"
 echo -e "${GREEN}========================================================${NC}\n"
