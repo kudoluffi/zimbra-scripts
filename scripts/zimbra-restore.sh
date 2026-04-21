@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v3.2
-# FIXED: Log to stderr in functions that return values
+# zimbra-restore.sh v3.3
+# FIXED: Multi-line value extraction for Sieve scripts & HTML signatures
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -8,7 +8,7 @@ set -eo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LOGGING (Fixed: Support stderr output)
+# LOGGING (to stderr)
 # ─────────────────────────────────────────────────────────────────────────────
 log()  { echo -e "${BLUE}[INFO]${NC} $1" >&2; }
 pass() { echo -e "${GREEN}[PASS]${NC} $1" >&2; }
@@ -80,7 +80,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.2${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.3${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -94,16 +94,12 @@ password_filename_to_account() {
   echo "$1" | sed 's/_/@/'
 }
 
-mailbox_filename_to_account() {
-  echo "${1}@${DOMAIN}"
-}
-
 email_to_localpart() {
   echo "$1" | cut -d'@' -f1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VALUE EXTRACTOR
+# FIXED: Single-line value extractor
 # ─────────────────────────────────────────────────────────────────────────────
 get_pref_value() {
   local file="$1"
@@ -112,7 +108,34 @@ get_pref_value() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GET ACCOUNT STATUS FROM BACKUP (Fixed: No log to stdout)
+# FIXED: Multi-line value extractor (for Sieve scripts & HTML signatures)
+# ─────────────────────────────────────────────────────────────────────────────
+get_pref_value_multiline() {
+  local file="$1"
+  local attr="$2"
+  local next_attr="$3"
+  
+  # Extract from "attr:" to "next_attr:" (or end of relevant section)
+  # Using sed range pattern as you suggested
+  if [ -n "$next_attr" ]; then
+    sed -n "/^${attr}:/,/^${next_attr}:/p" "$file" 2>/dev/null | \
+      head -n -1 | \
+      sed "1s/^${attr}:[[:space:]]*//" | \
+      sed 's/^[[:space:]]*//' | \
+      tr '\n' ' ' | \
+      sed 's/[[:space:]]*$//' || true
+  else
+    # Fallback: get until next attribute (any line starting with word:)
+    awk -v ATTR="$attr:" '
+      $0 ~ "^"ATTR { found=1; sub(/^'"$ATTR"'[[:space:]]*/, ""); printf "%s", $0; next }
+      found && /^[a-zA-Z][a-zA-Z0-9_-]*:/ { exit }
+      found { printf " %s", $0 }
+    ' "$file" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GET ACCOUNT STATUS FROM BACKUP
 # ─────────────────────────────────────────────────────────────────────────────
 get_account_status_from_backup() {
   local acc="$1"
@@ -121,7 +144,6 @@ get_account_status_from_backup() {
   
   local pref="$BACKUP_ROOT/mailboxes/$BACKUP_DATE/${localpart}-preferences.txt"
   
-  # Debug log to stderr (won't be captured in variable)
   log "   Checking preferences file: $pref" >&2
   
   if [ -f "$pref" ]; then
@@ -145,21 +167,17 @@ get_account_status_from_backup() {
 should_restore() {
   local acc="$1"
   
-  # Single user mode
   if [ -n "${SINGLE_USER:-}" ]; then
     [ "$acc" = "$SINGLE_USER" ] && return 0 || return 1
   fi
   
-  # Status filter = all
   if [ "${STATUS_FILTER:-}" = "all" ]; then
     return 0
   fi
   
-  # Get status from backup
   local status
   status=$(get_account_status_from_backup "$acc")
   
-  # If specific status filter
   if [ -n "${STATUS_FILTER:-}" ]; then
     if echo ",$STATUS_FILTER," | grep -q ",$status,"; then
       return 0
@@ -169,7 +187,6 @@ should_restore() {
     fi
   fi
   
-  # Default filter
   if echo ",$DEFAULT_STATUS," | grep -q ",$status,"; then
     return 0
   else
@@ -287,7 +304,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3: RESTORE PREFERENCES
+# STEP 3: RESTORE PREFERENCES (FIXED: Multi-line extraction)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Step 3: Restoring preferences (forwarding, filters, signatures)..."
@@ -312,10 +329,14 @@ restore_preferences() {
     local applied=0
     local failed_list=""
     
-    # Signature
+    # ───────────────────────────────────────────────────────────────────────
+    # 1. Signature (FIXED: Multi-line HTML extraction)
+    # ───────────────────────────────────────────────────────────────────────
     local sig_name sig_html
     sig_name=$(get_pref_value "$pref_file" "zimbraSignatureName")
-    sig_html=$(get_pref_value "$pref_file" "zimbraPrefMailSignatureHTML")
+    
+    # FIXED: Use multi-line extractor for HTML signature
+    sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML" "zimbraPrefMailSignatureStyle")
     
     [ -n "$sig_name" ] && log "     Found signature name: $sig_name"
     [ -n "$sig_html" ] && log "     Found signature HTML: $(echo "$sig_html" | head -c 100)..."
@@ -334,7 +355,7 @@ restore_preferences() {
           log "     ✓ Got signature ID: $sig_id"
           
           local escaped_html
-          escaped_html=$(printf '%s' "$sig_html" | sed "s/'/\\\\'/g" | tr '\n' ' ' | head -c 5000)
+          escaped_html=$(printf '%s' "$sig_html" | sed "s/'/\\\\'/g" | head -c 10000)
           
           log "     Setting signature HTML (${#escaped_html} chars)"
           if set_zimbra_attr "$acc" "zimbraPrefMailSignatureHTML" "$escaped_html"; then
@@ -373,7 +394,9 @@ restore_preferences() {
       fi
     fi
     
-    # Forwarding
+    # ───────────────────────────────────────────────────────────────────────
+    # 2. Forwarding
+    # ───────────────────────────────────────────────────────────────────────
     local fwd_addr
     fwd_addr=$(get_pref_value "$pref_file" "zimbraPrefMailForwardingAddress")
     if [ -n "$fwd_addr" ] && [ "$fwd_addr" != "zimbraPrefMailForwardingAddress" ]; then
@@ -387,16 +410,22 @@ restore_preferences() {
       fi
     fi
     
-    # Filters
+    # ───────────────────────────────────────────────────────────────────────
+    # 3. Filters (FIXED: Multi-line Sieve script extraction)
+    # ───────────────────────────────────────────────────────────────────────
     local sieve_script
-    sieve_script=$(get_pref_value "$pref_file" "zimbraMailSieveScript")
+    # FIXED: Use multi-line extractor for Sieve script
+    sieve_script=$(get_pref_value_multiline "$pref_file" "zimbraMailSieveScript" "zimbraMailSieveScriptMaxSize")
+    
     if [ -n "$sieve_script" ] && [ "$sieve_script" != "zimbraMailSieveScript" ]; then
       log "     Restoring filters..."
+      log "     Sieve script length: ${#sieve_script} chars"
       
       if echo "$sieve_script" | grep -q "^require"; then
         local escaped_sieve
-        escaped_sieve=$(printf '%s' "$sieve_script" | sed "s/'/\\\\'/g" | head -c 10000)
+        escaped_sieve=$(printf '%s' "$sieve_script" | sed "s/'/\\\\'/g" | head -c 15000)
         
+        log "     Setting Sieve script (${#escaped_sieve} chars)"
         if timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraMailSieveScript '$escaped_sieve'" 2>/dev/null; then
           applied=$((applied+1))
           log "     ✓ Applied Sieve script"
@@ -405,8 +434,11 @@ restore_preferences() {
           failed_list="${failed_list}filters,"
         fi
       else
-        log "     ⚠ Invalid Sieve script"
+        log "     ⚠ Invalid Sieve script (missing 'require')"
+        failed_list="${failed_list}filters,"
       fi
+    else
+      log "     ⚠ No Sieve script found in backup"
     fi
     
     # Summary
@@ -534,7 +566,7 @@ echo -e "${GREEN}  RESTORE COMPLETED${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 echo -e "Log: /tmp/zimbra-restore.log" >&2
 echo -e "${YELLOW}Verify:${NC}" >&2
-echo -e "  su - zimbra -c 'zmprov gaa | grep $DOMAIN'" >&2
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraAccountStatus'" >&2
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML' | head -3" >&2
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraMailSieveScript' | head -5" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
