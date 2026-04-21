@@ -1,5 +1,5 @@
 #!/bin/bash
-# zimbra-restore.sh v3.10
+# zimbra-restore.sh v3.10.1
 # FINAL: Simple file-based approach (like v3.4) + restore signature name
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
@@ -72,7 +72,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.10${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.10.1${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -287,7 +287,7 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 2. Signature HTML (FILE approach - V3.4)
+    # 2. Signature HTML (BASE64 approach)
     # ───────────────────────────────────────────────────────────────────────
     local sig_html
     sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML" "zimbraPrefMailSignatureStyle" "false")
@@ -296,14 +296,16 @@ restore_preferences() {
       log "     Setting signature HTML (${#sig_html} chars)"
       local temp_html="/tmp/sig_${fn}.html"
       
+      # Write HTML to temp file
       printf '%s' "$sig_html" > "$temp_html"
       
-      if set_zimbra_attr_from_file "$acc" "zimbraPrefMailSignatureHTML" "$temp_html"; then
+      # Use base64 to avoid ALL escaping issues
+      if set_zimbra_attr_base64 "$acc" "zimbraPrefMailSignatureHTML" "$temp_html"; then
         log "     ✓ Set signature HTML"
         applied=$((applied+1))
       else
         log "     ✗ Failed to set signature HTML"
-        failed_list="${failed_list}signature_html,"
+        failed_list="${failed_list}signature,"
       fi
     fi
     
