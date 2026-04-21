@@ -1,17 +1,20 @@
 #!/bin/bash
-# zimbra-restore.sh v3.1
-# FIXED: Preferences filename format (localpart only, not localpart_domain)
+# zimbra-restore.sh v3.2
+# FIXED: Log to stderr in functions that return values
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-log()  { echo -e "${BLUE}[INFO]${NC} $1"; }
-pass() { echo -e "${GREEN}[PASS]${NC} $1"; }
-fail() { echo -e "${RED}[FAIL]${NC} $1"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-err()  { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGGING (Fixed: Support stderr output)
+# ─────────────────────────────────────────────────────────────────────────────
+log()  { echo -e "${BLUE}[INFO]${NC} $1" >&2; }
+pass() { echo -e "${GREEN}[PASS]${NC} $1" >&2; }
+fail() { echo -e "${RED}[FAIL]${NC} $1" >&2; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $1" >&2; }
+err()  { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
 [ "$(id -u)" -ne 0 ] && { echo "Run as root: sudo bash $0"; exit 1; }
 
@@ -41,10 +44,6 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "MODES: accounts, passwords, preferences, mailboxes, distribution-lists, all"
       echo "FILTERS: --status LIST (default: active,locked,lockout)"
-      echo ""
-      echo "EXAMPLES:"
-      echo "  sudo bash zimbra-restore.sh --mode all --status active 20260420"
-      echo "  sudo bash zimbra-restore.sh --mode accounts,passwords --status active 20260420"
       exit 0
       ;;
     *)
@@ -80,13 +79,13 @@ get_backup_domain() {
 
 DOMAIN=$(get_backup_domain)
 
-echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Restore Script v3.1${NC}"
-echo -e "${GREEN}========================================================${NC}\n"
+echo -e "\n${GREEN}========================================================${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.2${NC}" >&2
+echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
 [ -n "$STATUS_FILTER" ] && log "Status Filter: $STATUS_FILTER"
-echo ""
+echo "" >&2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FILENAME PARSING
@@ -99,7 +98,6 @@ mailbox_filename_to_account() {
   echo "${1}@${DOMAIN}"
 }
 
-# FIXED: Extract localpart from full email for preferences filename
 email_to_localpart() {
   echo "$1" | cut -d'@' -f1
 }
@@ -114,29 +112,29 @@ get_pref_value() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIXED: Get account status from backup (correct filename format)
+# GET ACCOUNT STATUS FROM BACKUP (Fixed: No log to stdout)
 # ─────────────────────────────────────────────────────────────────────────────
 get_account_status_from_backup() {
   local acc="$1"
   local localpart
   localpart=$(email_to_localpart "$acc")
   
-  # FIXED: Preferences file format is localpart-preferences.txt (NOT localpart_domain-preferences.txt)
   local pref="$BACKUP_ROOT/mailboxes/$BACKUP_DATE/${localpart}-preferences.txt"
   
-  log "   Checking preferences file: $pref"
+  # Debug log to stderr (won't be captured in variable)
+  log "   Checking preferences file: $pref" >&2
   
   if [ -f "$pref" ]; then
     local status
     status=$(get_pref_value "$pref" "zimbraAccountStatus")
     if [ -n "$status" ]; then
-      log "   Found status '$status' for $acc"
+      log "   Found status '$status' for $acc" >&2
       echo "$status"
     else
       echo "active"
     fi
   else
-    log "   Preferences file not found, assuming 'active'"
+    log "   Preferences file not found, assuming 'active'" >&2
     echo "active"
   fi
 }
@@ -147,12 +145,12 @@ get_account_status_from_backup() {
 should_restore() {
   local acc="$1"
   
-  # Single user mode: always restore
+  # Single user mode
   if [ -n "${SINGLE_USER:-}" ]; then
     [ "$acc" = "$SINGLE_USER" ] && return 0 || return 1
   fi
   
-  # Status filter = all: restore all
+  # Status filter = all
   if [ "${STATUS_FILTER:-}" = "all" ]; then
     return 0
   fi
@@ -161,7 +159,7 @@ should_restore() {
   local status
   status=$(get_account_status_from_backup "$acc")
   
-  # If specific status filter, check match
+  # If specific status filter
   if [ -n "${STATUS_FILTER:-}" ]; then
     if echo ",$STATUS_FILTER," | grep -q ",$status,"; then
       return 0
@@ -171,7 +169,7 @@ should_restore() {
     fi
   fi
   
-  # Default filter: active, locked, lockout
+  # Default filter
   if echo ",$DEFAULT_STATUS," | grep -q ",$status,"; then
     return 0
   else
@@ -219,7 +217,6 @@ restore_accounts() {
     local acc
     acc=$(password_filename_to_account "$fn")
     
-    # Check status filter BEFORE creating account
     should_restore "$acc" || continue
     
     if account_exists "$acc"; then
@@ -248,7 +245,8 @@ restore_accounts() {
     fi
   done
   
-  echo ""; pass "   Accounts: $ok created/updated, $fail failed"
+  echo "" >&2
+  pass "   Accounts: $ok created/updated, $fail failed"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,7 +282,8 @@ restore_passwords() {
       fi
     fi
   done
-  echo ""; pass "   Passwords: $ok ok, $fail fail"
+  echo "" >&2
+  pass "   Passwords: $ok ok, $fail fail"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,7 +419,8 @@ restore_preferences() {
       fail=$((fail+1)); warn "      ✗ $acc (no settings applied)"
     fi
   done
-  echo ""; pass "   Preferences: $ok ok, $fail fail"
+  echo "" >&2
+  pass "   Preferences: $ok ok, $fail fail"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -467,7 +467,8 @@ restore_dls() {
     fi
   done < "$dl_file"
   
-  echo ""; pass "   DLs: $dl_ok restored, $member_ok total members"
+  echo "" >&2
+  pass "   DLs: $dl_ok restored, $member_ok total members"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -512,27 +513,28 @@ restore_mailboxes() {
       ok=$((ok+1)); pass "      ✓ $acc"
     fi
   done
-  echo ""; pass "   Mailboxes: $ok ok, $fail fail"
+  echo "" >&2
+  pass "   Mailboxes: $ok ok, $fail fail"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 log "Starting restore in sequence: Accounts → Passwords → Preferences → DLs → Mailboxes"
-echo ""
+echo "" >&2
 
-echo ",$MODES," | grep -q ",accounts," && { restore_accounts; echo ""; }
-echo ",$MODES," | grep -q ",passwords," && { restore_passwords; echo ""; }
-echo ",$MODES," | grep -q ",preferences," && { restore_preferences; echo ""; }
-echo ",$MODES," | grep -q ",distribution-lists," && { restore_dls; echo ""; }
-echo ",$MODES," | grep -q ",mailboxes," && { restore_mailboxes; echo ""; }
+echo ",$MODES," | grep -q ",accounts," && { restore_accounts; echo "" >&2; }
+echo ",$MODES," | grep -q ",passwords," && { restore_passwords; echo "" >&2; }
+echo ",$MODES," | grep -q ",preferences," && { restore_preferences; echo "" >&2; }
+echo ",$MODES," | grep -q ",distribution-lists," && { restore_dls; echo "" >&2; }
+echo ",$MODES," | grep -q ",mailboxes," && { restore_mailboxes; echo "" >&2; }
 
-echo -e "${GREEN}========================================================${NC}"
-echo -e "${GREEN}  RESTORE COMPLETED${NC}"
-echo -e "${GREEN}========================================================${NC}"
-echo -e "Log: /tmp/zimbra-restore.log"
-echo -e "${YELLOW}Verify:${NC}"
-echo -e "  su - zimbra -c 'zmprov gaa | grep $DOMAIN'"
-echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraAccountStatus'"
-echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML' | head -3"
-echo -e "${GREEN}========================================================${NC}\n"
+echo -e "${GREEN}========================================================${NC}" >&2
+echo -e "${GREEN}  RESTORE COMPLETED${NC}" >&2
+echo -e "${GREEN}========================================================${NC}" >&2
+echo -e "Log: /tmp/zimbra-restore.log" >&2
+echo -e "${YELLOW}Verify:${NC}" >&2
+echo -e "  su - zimbra -c 'zmprov gaa | grep $DOMAIN'" >&2
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraAccountStatus'" >&2
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML' | head -3" >&2
+echo -e "${GREEN}========================================================${NC}" >&2
