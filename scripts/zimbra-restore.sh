@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v3.11
-# FINAL: Use zmmailbox for signature HTML (more tolerant than zmprov)
+# zimbra-restore.sh v3.12
+# FINAL: Base64 for signature HTML + restore all signature IDs
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -72,7 +72,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.11${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.12${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -166,15 +166,27 @@ set_zimbra_attr() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SET SIGNATURE HTML (zmmailbox - handles special chars better!)
+# GET ATTRIBUTE
 # ─────────────────────────────────────────────────────────────────────────────
-set_signature_html() {
+get_zimbra_attr() {
+  local acc="$1"
+  local attr="$2"
+  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ga '$acc' '$attr'" 2>/dev/null | grep "^${attr}:" | sed "s/^${attr}:[[:space:]]*//" | head -1 || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SET SIGNATURE HTML USING BASE64 (FROM V3.9 - WORKS!)
+# ─────────────────────────────────────────────────────────────────────────────
+set_signature_html_base64() {
   local acc="$1"
   local temp_file="$2"
   
-  # Use zmmailbox modifyAccount which handles HTML better
-  # Read from file to avoid shell escaping
-  su - "$ZIMBRA_USER" -c "zmmailbox -z -m '$acc' modifyAccount zimbraPrefMailSignatureHTML \"\$(cat '$temp_file')\"" 2>/dev/null
+  # Encode file content to base64 (safe for shell)
+  local encoded
+  encoded=$(base64 -w 0 "$temp_file")
+  
+  # Decode and apply as zimbra user
+  su - "$ZIMBRA_USER" -c "echo '$encoded' | base64 -d | xargs -0 printf '%s' | xargs -I {} zmprov ma '$acc' 'zimbraPrefMailSignatureHTML' '{}'" 2>/dev/null
   local result=$?
   
   rm -f "$temp_file"
@@ -262,7 +274,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3: RESTORE PREFERENCES
+# STEP 3: RESTORE PREFERENCES (COMPLETE SIGNATURE RESTORE)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Step 3: Restoring preferences..."
@@ -283,45 +295,84 @@ restore_preferences() {
     local failed_list=""
     
     # ───────────────────────────────────────────────────────────────────────
-    # 1. Signature Name
+    # COMPLETE SIGNATURE RESTORE (Name + HTML + IDs)
     # ───────────────────────────────────────────────────────────────────────
-    local sig_name
+    local sig_name sig_html backup_sig_id
     sig_name=$(get_pref_value "$pref_file" "zimbraSignatureName")
+    sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML" "zimbraPrefMailSignatureStyle" "false")
+    backup_sig_id=$(get_pref_value "$pref_file" "zimbraPrefDefaultSignatureId")
     
+    local signature_restored=false
+    
+    # Step 1: Set signature name
     if [ -n "$sig_name" ] && [ "$sig_name" != "zimbraSignatureName" ]; then
       log "     Setting signature name: $sig_name"
       if set_zimbra_attr "$acc" "zimbraSignatureName" "$sig_name"; then
         log "     ✓ Set signature name"
-        applied=$((applied+1))
+        signature_restored=true
       else
         log "     ✗ Failed to set signature name"
         failed_list="${failed_list}signature_name,"
       fi
     fi
     
-    # ───────────────────────────────────────────────────────────────────────
-    # 2. Signature HTML (zmmailbox - handles special chars!)
-    # ───────────────────────────────────────────────────────────────────────
-    local sig_html
-    sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML" "zimbraPrefMailSignatureStyle" "false")
-    
-    if [ -n "$sig_html" ]; then
+    # Step 2: Set signature HTML (BASE64 approach from v3.9)
+    if [ -n "$sig_html" ] && [ "$signature_restored" = "true" ]; then
       log "     Setting signature HTML (${#sig_html} chars)"
       local temp_html="/tmp/sig_${fn}.html"
       
       printf '%s' "$sig_html" > "$temp_html"
       
-      if set_signature_html "$acc" "$temp_html"; then
+      if set_signature_html_base64 "$acc" "$temp_html"; then
         log "     ✓ Set signature HTML"
-        applied=$((applied+1))
       else
         log "     ✗ Failed to set signature HTML"
         failed_list="${failed_list}signature_html,"
+        signature_restored=false
+      fi
+    fi
+    
+    # Step 3: Get or set signature ID
+    if [ "$signature_restored" = "true" ]; then
+      # Try to get auto-generated signature ID first
+      local current_sig_id
+      current_sig_id=$(get_zimbra_attr "$acc" "zimbraSignatureId")
+      
+      if [ -n "$current_sig_id" ]; then
+        log "     ✓ Got signature ID: $current_sig_id"
+        
+        # Set default signature ID
+        if set_zimbra_attr "$acc" "zimbraPrefDefaultSignatureId" "$current_sig_id"; then
+          log "     ✓ Set default signature ID"
+          applied=$((applied+1))
+        else
+          log "     ⚠ Could not set default signature ID"
+        fi
+        
+        # Set forward/reply signature ID
+        if set_zimbra_attr "$acc" "zimbraPrefForwardReplySignatureId" "$current_sig_id"; then
+          log "     ✓ Set forward/reply signature ID"
+          applied=$((applied+1))
+        else
+          log "     ⚠ Could not set forward/reply signature ID"
+        fi
+      elif [ -n "$backup_sig_id" ] && [ "$backup_sig_id" != "zimbraPrefDefaultSignatureId" ]; then
+        # Fallback: use backup signature ID
+        log "     ⚠ Using backup signature ID: $backup_sig_id"
+        if set_zimbra_attr "$acc" "zimbraPrefDefaultSignatureId" "$backup_sig_id"; then
+          log "     ✓ Set default signature ID from backup"
+          applied=$((applied+1))
+        fi
+        
+        if set_zimbra_attr "$acc" "zimbraPrefForwardReplySignatureId" "$backup_sig_id"; then
+          log "     ✓ Set forward/reply signature ID from backup"
+          applied=$((applied+1))
+        fi
       fi
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 3. Forwarding
+    # Forwarding
     # ───────────────────────────────────────────────────────────────────────
     local fwd_addr=$(get_pref_value "$pref_file" "zimbraPrefMailForwardingAddress")
     if [ -n "$fwd_addr" ] && [ "$fwd_addr" != "zimbraPrefMailForwardingAddress" ]; then
@@ -330,7 +381,7 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 4. Filters (v3.4 approach - already working)
+    # Filters (v3.4 approach - already working)
     # ───────────────────────────────────────────────────────────────────────
     local sieve_script
     sieve_script=$(get_pref_value_multiline "$pref_file" "zimbraMailSieveScript" "zimbraMailSieveScriptMaxSize" "true")
@@ -456,6 +507,7 @@ echo -e "${GREEN}========================================================${NC}" 
 echo -e "Log: /tmp/zimbra-restore.log" >&2
 echo -e "${YELLOW}Verify:${NC}" >&2
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraSignatureName'" >&2
-echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML'" >&2
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML' | head -3" >&2
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefDefaultSignatureId'" >&2
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraMailSieveScript' | head -5" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
