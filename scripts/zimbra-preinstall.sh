@@ -147,6 +147,7 @@ ufw allow 587/tcp
 ufw allow 993/tcp
 ufw allow 995/tcp
 ufw allow 7071/tcp
+ufw allow 8443/tcp
 
 echo "y" | ufw enable 2>/dev/null || ufw --force enable
 sleep 2
