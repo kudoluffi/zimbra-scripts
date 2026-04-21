@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v3.7
-# FINAL: Back to v3.4 temp file approach (which worked for filters)
+# zimbra-restore.sh v3.8
+# FINAL: Signature HTML - use xargs to avoid shell escaping issues
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -72,7 +72,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.7${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.8${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -162,7 +162,7 @@ get_zimbra_attr() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SIMPLE SET ATTRIBUTE (for simple values)
+# SIMPLE SET ATTRIBUTE
 # ─────────────────────────────────────────────────────────────────────────────
 set_zimbra_attr() {
   local acc="$1"
@@ -172,23 +172,16 @@ set_zimbra_attr() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SET ATTRIBUTE WITH TEMP FILE (for complex values - V3.4 APPROACH)
+# FIXED: SET ATTRIBUTE FROM FILE USING XARGS (NO SHELL ESCAPING!)
 # ─────────────────────────────────────────────────────────────────────────────
-set_zimbra_attr_with_file() {
+set_zimbra_attr_from_file() {
   local acc="$1"
   local attr="$2"
-  local value="$3"
-  local temp_file="$4"
+  local temp_file="$3"
   
-  # Write value to temp file
-  printf '%s' "$value" > "$temp_file"
-  
-  # Read file content and pass as argument (V3.4 approach that worked!)
-  local content
-  content=$(cat "$temp_file")
-  
-  # Apply using zmprov with the content
-  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$attr' '$content'" 2>/dev/null
+  # Use xargs to read file content and pass as argument
+  # This avoids ALL shell escaping issues!
+  cat "$temp_file" | xargs -0 -I {} su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$attr' '{}'" 2>/dev/null
   local result=$?
   
   rm -f "$temp_file"
@@ -259,7 +252,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3: RESTORE PREFERENCES (V3.4 APPROACH - TEMP FILE)
+# STEP 3: RESTORE PREFERENCES
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Step 3: Restoring preferences..."
@@ -280,7 +273,7 @@ restore_preferences() {
     local failed_list=""
     
     # ───────────────────────────────────────────────────────────────────────
-    # 1. Signature HTML (V3.4 temp file approach)
+    # 1. Signature HTML (FIXED: xargs approach)
     # ───────────────────────────────────────────────────────────────────────
     local sig_html
     sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML" "zimbraPrefMailSignatureStyle" "false")
@@ -289,7 +282,11 @@ restore_preferences() {
       log "     Setting signature HTML (${#sig_html} chars)"
       local temp_html="/tmp/sig_${fn}.html"
       
-      if set_zimbra_attr_with_file "$acc" "zimbraPrefMailSignatureHTML" "$sig_html" "$temp_html"; then
+      # Write HTML to temp file
+      printf '%s' "$sig_html" > "$temp_html"
+      
+      # Use xargs to avoid shell escaping
+      if set_zimbra_attr_from_file "$acc" "zimbraPrefMailSignatureHTML" "$temp_html"; then
         log "     ✓ Set signature HTML"
         applied=$((applied+1))
       else
@@ -308,7 +305,7 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 3. Filters (V3.4 temp file approach - ALREADY WORKING)
+    # 3. Filters (xargs approach - same as signature now)
     # ───────────────────────────────────────────────────────────────────────
     local sieve_script
     sieve_script=$(get_pref_value_multiline "$pref_file" "zimbraMailSieveScript" "zimbraMailSieveScriptMaxSize" "true")
@@ -317,7 +314,9 @@ restore_preferences() {
       log "     Restoring filters (${#sieve_script} chars)"
       local temp_sieve="/tmp/sieve_${fn}.sieve"
       
-      if set_zimbra_attr_with_file "$acc" "zimbraMailSieveScript" "$sieve_script" "$temp_sieve"; then
+      printf '%s' "$sieve_script" > "$temp_sieve"
+      
+      if set_zimbra_attr_from_file "$acc" "zimbraMailSieveScript" "$temp_sieve"; then
         log "     ✓ Applied Sieve script"
         applied=$((applied+1))
       else
