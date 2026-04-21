@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v3.8
-# FINAL: Signature HTML - use xargs to avoid shell escaping issues
+# zimbra-restore.sh v3.9
+# FINAL: Signature HTML - use base64 encoding to bypass ALL escaping issues
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -72,7 +72,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.8${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.9${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -155,12 +155,6 @@ account_exists() {
   timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ga '$1' &>/dev/null" 2>/dev/null || return 1
 }
 
-get_zimbra_attr() {
-  local acc="$1"
-  local attr="$2"
-  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ga '$acc' '$attr'" 2>/dev/null | grep "^${attr}:" | sed "s/^${attr}:[[:space:]]*//" | head -1 || true
-}
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SIMPLE SET ATTRIBUTE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,16 +166,19 @@ set_zimbra_attr() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIXED: SET ATTRIBUTE FROM FILE USING XARGS (NO SHELL ESCAPING!)
+# FIXED: SET HTML/SIEVE FROM FILE USING BASE64 (NO ESCAPING NEEDED!)
 # ─────────────────────────────────────────────────────────────────────────────
-set_zimbra_attr_from_file() {
+set_zimbra_attr_base64() {
   local acc="$1"
   local attr="$2"
   local temp_file="$3"
   
-  # Use xargs to read file content and pass as argument
-  # This avoids ALL shell escaping issues!
-  cat "$temp_file" | xargs -0 -I {} su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$attr' '{}'" 2>/dev/null
+  # Encode file content to base64 (safe for shell)
+  local encoded
+  encoded=$(base64 -w 0 "$temp_file")
+  
+  # Decode and apply as zimbra user
+  su - "$ZIMBRA_USER" -c "echo '$encoded' | base64 -d | xargs -0 printf '%s' | xargs -I {} zmprov ma '$acc' '$attr' '{}'" 2>/dev/null
   local result=$?
   
   rm -f "$temp_file"
@@ -273,7 +270,7 @@ restore_preferences() {
     local failed_list=""
     
     # ───────────────────────────────────────────────────────────────────────
-    # 1. Signature HTML (FIXED: xargs approach)
+    # 1. Signature HTML (BASE64 approach)
     # ───────────────────────────────────────────────────────────────────────
     local sig_html
     sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML" "zimbraPrefMailSignatureStyle" "false")
@@ -285,8 +282,8 @@ restore_preferences() {
       # Write HTML to temp file
       printf '%s' "$sig_html" > "$temp_html"
       
-      # Use xargs to avoid shell escaping
-      if set_zimbra_attr_from_file "$acc" "zimbraPrefMailSignatureHTML" "$temp_html"; then
+      # Use base64 to avoid ALL escaping issues
+      if set_zimbra_attr_base64 "$acc" "zimbraPrefMailSignatureHTML" "$temp_html"; then
         log "     ✓ Set signature HTML"
         applied=$((applied+1))
       else
@@ -305,7 +302,7 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 3. Filters (xargs approach - same as signature now)
+    # 3. Filters (BASE64 approach - same as signature)
     # ───────────────────────────────────────────────────────────────────────
     local sieve_script
     sieve_script=$(get_pref_value_multiline "$pref_file" "zimbraMailSieveScript" "zimbraMailSieveScriptMaxSize" "true")
@@ -316,7 +313,7 @@ restore_preferences() {
       
       printf '%s' "$sieve_script" > "$temp_sieve"
       
-      if set_zimbra_attr_from_file "$acc" "zimbraMailSieveScript" "$temp_sieve"; then
+      if set_zimbra_attr_base64 "$acc" "zimbraMailSieveScript" "$temp_sieve"; then
         log "     ✓ Applied Sieve script"
         applied=$((applied+1))
       else
