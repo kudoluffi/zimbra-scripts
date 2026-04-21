@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v2.6
-# FINAL: Fixed value extraction (proper sed) + status filter working
+# zimbra-restore.sh v3.0
+# REDESIGNED: Proper restore sequence (Accounts → Passwords → Preferences → DLs → Mailboxes)
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -38,7 +38,24 @@ while [[ $# -gt 0 ]]; do
     --user) SINGLE_USER="$2"; shift 2 ;;
     -h|--help)
       echo "Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE"
-      echo "MODES: passwords, mailboxes, preferences, distribution-lists, all"
+      echo ""
+      echo "MODES (comma-separated):"
+      echo "  accounts            Create user accounts with status filter"
+      echo "  passwords           Restore password hashes"
+      echo "  preferences         Restore preferences (forwarding, filters, signatures)"
+      echo "  mailboxes           Restore mailbox content (TGZ)"
+      echo "  distribution-lists  Restore distribution lists and members"
+      echo "  all                 Restore everything (accounts+passwords+preferences+mailboxes+DLs)"
+      echo ""
+      echo "FILTERS:"
+      echo "  --status LIST       Only restore accounts with status in LIST"
+      echo "                      Default: active,locked,lockout"
+      echo "                      Use 'all' to restore all accounts regardless of status"
+      echo ""
+      echo "EXAMPLES:"
+      echo "  sudo bash zimbra-restore.sh --mode all --status active 20260420"
+      echo "  sudo bash zimbra-restore.sh --mode accounts,passwords --status active 20260420"
+      echo "  sudo bash zimbra-restore.sh --mode mailboxes --status all 20260420"
       exit 0
       ;;
     *)
@@ -54,7 +71,7 @@ done
 
 [ -z "$BACKUP_DATE" ] && err "Backup date required"
 [ -z "$MODES" ] && err "Mode required"
-[ "$MODES" = "all" ] && MODES="passwords,mailboxes,preferences,distribution-lists"
+[ "$MODES" = "all" ] && MODES="accounts,passwords,preferences,mailboxes,distribution-lists"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GET DOMAIN
@@ -75,7 +92,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Restore Script v2.6${NC}"
+echo -e "${GREEN}  Zimbra Restore Script v3.0${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -98,18 +115,16 @@ pref_filename_to_account() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIXED: Simple value extractor using grep + sed (NO AWK)
+# VALUE EXTRACTOR (Simple grep + sed)
 # ─────────────────────────────────────────────────────────────────────────────
 get_pref_value() {
   local file="$1"
   local attr="$2"
-  
-  # Find line starting with "attr:" and extract everything after first colon+space
   grep "^${attr}:" "$file" 2>/dev/null | head -1 | sed "s/^${attr}:[[:space:]]*//" || true
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Get account status from backup preferences
+# GET ACCOUNT STATUS FROM BACKUP
 # ─────────────────────────────────────────────────────────────────────────────
 get_account_status_from_backup() {
   local acc="$1"
@@ -125,7 +140,7 @@ get_account_status_from_backup() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Check if account should be restored
+# CHECK IF ACCOUNT SHOULD BE CREATED/RESTORED
 # ─────────────────────────────────────────────────────────────────────────────
 should_restore() {
   local acc="$1"
@@ -143,9 +158,6 @@ should_restore() {
   # Get status from backup
   local status
   status=$(get_account_status_from_backup "$acc")
-  
-  # Debug log
-  log "   Account $acc has status '$status' in backup"
   
   # If specific status filter, check match
   if [ -n "${STATUS_FILTER:-}" ]; then
@@ -170,12 +182,6 @@ account_exists() {
   timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ga '$1' &>/dev/null" 2>/dev/null || return 1
 }
 
-create_account() {
-  local acc="$1" pwd="$2"
-  log "   Creating: $acc"
-  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ca '$acc' '$pwd'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null || return 1
-}
-
 get_zimbra_attr() {
   local acc="$1"
   local attr="$2"
@@ -190,10 +196,72 @@ set_zimbra_attr() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: PASSWORDS
+# STEP 1: RESTORE ACCOUNTS (Create + Set Status)
+# ─────────────────────────────────────────────────────────────────────────────
+restore_accounts() {
+  log "Step 1: Restoring user accounts (with status filter)..."
+  
+  local password_dir="$BACKUP_ROOT/passwords/$BACKUP_DATE"
+  if [ ! -d "$password_dir" ]; then
+    warn "   Password directory not found, cannot determine accounts to create"
+    return 1
+  fi
+  
+  local ok=0 fail=0
+  
+  for shadow_file in "$password_dir"/*.shadow; do
+    [ -f "$shadow_file" ] || continue
+    
+    local fn
+    fn=$(basename "$shadow_file" .shadow)
+    local acc
+    acc=$(password_filename_to_account "$fn")
+    
+    # Check status filter BEFORE creating account
+    should_restore "$acc" || continue
+    
+    # Check if account already exists
+    if account_exists "$acc"; then
+      log "   Account exists: $acc"
+      
+      # Update status if needed
+      local status
+      status=$(get_account_status_from_backup "$acc")
+      log "   Updating status to: $status"
+      set_zimbra_attr "$acc" "zimbraAccountStatus" "$status" && \
+        { ok=$((ok+1)); pass "      ✓ $acc (status: $status)"; } || \
+        { fail=$((fail+1)); fail "      ✗ $acc"; }
+    else
+      # Create new account with status
+      local status
+      status=$(get_account_status_from_backup "$acc")
+      local hash
+      hash=$(cat "$shadow_file")
+      
+      log "   Creating: $acc (status: $status)"
+      
+      # Create account with temp password first, then set hash and status
+      if timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ca '$acc' 'TempRestore123!'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null; then
+        # Set password hash
+        set_zimbra_attr "$acc" "userPassword" "$hash"
+        # Set status
+        set_zimbra_attr "$acc" "zimbraAccountStatus" "$status"
+        ok=$((ok+1)); pass "      ✓ $acc (status: $status)"
+      else
+        fail=$((fail+1)); fail "      ✗ $acc"
+      fi
+    fi
+  done
+  
+  echo ""; pass "   Accounts: $ok created/updated, $fail failed"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2: RESTORE PASSWORDS
 # ─────────────────────────────────────────────────────────────────────────────
 restore_passwords() {
-  log "Restoring passwords..."
+  log "Step 2: Restoring password hashes..."
+  
   local dir="$BACKUP_ROOT/passwords/$BACKUP_DATE"
   if [ ! -d "$dir" ]; then
     warn "   Not found"
@@ -208,16 +276,17 @@ restore_passwords() {
     local acc
     acc=$(password_filename_to_account "$fn")
     
-    # Check status BEFORE restore
-    should_restore "$acc" || continue
-    
-    account_exists "$acc" || create_account "$acc" "TempRestore123!"
+    # Skip if account doesn't exist (filtered in step 1)
+    if ! account_exists "$acc"; then
+      log "   Skipping $acc (account not created)"
+      continue
+    fi
     
     local hash
     hash=$(cat "$f")
     if [ -n "$hash" ]; then
       log "   Setting password: $acc"
-      if timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' userPassword '$hash'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null; then
+      if set_zimbra_attr "$acc" "userPassword" "$hash"; then
         ok=$((ok+1)); pass "      ✓ $acc"
       else
         fail=$((fail+1)); fail "      ✗ $acc"
@@ -228,62 +297,10 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: MAILBOXES
-# ─────────────────────────────────────────────────────────────────────────────
-restore_mailboxes() {
-  log "Restoring mailboxes (OSE mode: postRestURL)..."
-  local dir="$BACKUP_ROOT/mailboxes/$BACKUP_DATE"
-  if [ ! -d "$dir" ]; then
-    warn "   Not found"
-    return 1
-  fi
-  
-  shopt -s nullglob
-  local files=("$dir"/*.tgz)
-  shopt -u nullglob
-  log "   Found ${#files[@]} backup file(s)"
-  if [ ${#files[@]} -eq 0 ]; then
-    warn "   No .tgz files!"
-    ls "$dir/"
-    return 1
-  fi
-  
-  local ok=0 fail=0
-  for f in "${files[@]}"; do
-    local fn
-    fn=$(basename "$f" .tgz)
-    local acc
-    acc=$(mailbox_filename_to_account "$fn")
-    
-    log "   Processing: $fn → $acc"
-    echo "$acc" | grep -q "@" || { warn "   Invalid: $acc"; continue; }
-    
-    # Check status BEFORE restore
-    should_restore "$acc" || continue
-    
-    account_exists "$acc" || create_account "$acc" "TempRestore123!"
-    
-    log "   Restoring mailbox: $acc"
-    
-    local restore_output
-    restore_output=$(timeout 120 su - "$ZIMBRA_USER" -c "zmmailbox -z -m '$acc' postRestURL '/?fmt=tgz&resolve=skip' '$f'" 2>&1) || true
-    echo "$restore_output" >> /tmp/zimbra-restore.log
-    
-    if echo "$restore_output" | grep -qi "usage:\|error\|exception\|fail"; then
-      fail=$((fail+1)); fail "      ✗ $acc"
-      log "   Error: $(echo "$restore_output" | head -2)"
-    else
-      ok=$((ok+1)); pass "      ✓ $acc"
-    fi
-  done
-  echo ""; pass "   Mailboxes: $ok ok, $fail fail"
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: PREFERENCES
+# STEP 3: RESTORE PREFERENCES (No status - already done in step 1)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
-  log "Restoring user preferences (signatures, filters, forwarding, status)..."
+  log "Step 3: Restoring preferences (forwarding, filters, signatures)..."
   local dir="$BACKUP_ROOT/mailboxes/$BACKUP_DATE"
   if [ ! -d "$dir" ]; then
     warn "   Not found"
@@ -298,9 +315,11 @@ restore_preferences() {
     local acc
     acc=$(pref_filename_to_account "$fn")
     
-    echo "$acc" | grep -q "@" || continue
-    should_restore "$acc" || continue
-    account_exists "$acc" || continue
+    # Skip if account doesn't exist
+    if ! account_exists "$acc"; then
+      log "   Skipping $acc (account not created)"
+      continue
+    fi
     
     log "   Restoring preferences: $acc"
     
@@ -308,29 +327,12 @@ restore_preferences() {
     local failed_list=""
     
     # ───────────────────────────────────────────────────────────────────────
-    # 1. Restore Account Status
-    # ───────────────────────────────────────────────────────────────────────
-    local value
-    value=$(get_pref_value "$pref_file" "zimbraAccountStatus")
-    if [ -n "$value" ] && [ "$value" != "zimbraAccountStatus" ]; then
-      log "     Setting zimbraAccountStatus: $value"
-      if set_zimbra_attr "$acc" "zimbraAccountStatus" "$value"; then
-        applied=$((applied+1))
-        log "     ✓ Applied zimbraAccountStatus"
-      else
-        failed_list="${failed_list}zimbraAccountStatus,"
-        log "     ✗ Failed zimbraAccountStatus"
-      fi
-    fi
-    
-    # ───────────────────────────────────────────────────────────────────────
-    # 2. Restore Signature
+    # 1. Signature
     # ───────────────────────────────────────────────────────────────────────
     local sig_name sig_html
     sig_name=$(get_pref_value "$pref_file" "zimbraSignatureName")
     sig_html=$(get_pref_value "$pref_file" "zimbraPrefMailSignatureHTML")
     
-    # Debug
     [ -n "$sig_name" ] && log "     Found signature name: $sig_name"
     [ -n "$sig_html" ] && log "     Found signature HTML: $(echo "$sig_html" | head -c 100)..."
     
@@ -388,7 +390,7 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 3. Restore Forwarding
+    # 2. Forwarding
     # ───────────────────────────────────────────────────────────────────────
     local fwd_addr
     fwd_addr=$(get_pref_value "$pref_file" "zimbraPrefMailForwardingAddress")
@@ -404,7 +406,7 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 4. Restore Filters
+    # 3. Filters
     # ───────────────────────────────────────────────────────────────────────
     local sieve_script
     sieve_script=$(get_pref_value "$pref_file" "zimbraMailSieveScript")
@@ -441,10 +443,10 @@ restore_preferences() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: DISTRIBUTION LISTS
+# STEP 4: RESTORE DISTRIBUTION LISTS
 # ─────────────────────────────────────────────────────────────────────────────
 restore_dls() {
-  log "Restoring distribution lists..."
+  log "Step 4: Restoring distribution lists..."
   local dl_file="$BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt"
   [ ! -f "$dl_file" ] && { warn "   Not found"; return 1; }
   
@@ -470,10 +472,11 @@ restore_dls() {
         [ "$member" = "members" ] && continue
         echo "$member" | grep -qE "^[^@]+@[^@]+\.[^@]+$" || continue
         
+        # Only add if member account exists (filtered in step 1)
         if account_exists "$member"; then
           timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov adlm '$dl' '$member'" 2>/dev/null && m_ok=$((m_ok+1))
         else
-          log "      ⚠ Member not found: $member"
+          log "      ⚠ Member not found: $member (skipped)"
         fi
       done < "$member_file"
       member_ok=$((member_ok + m_ok))
@@ -488,21 +491,86 @@ restore_dls() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAIN
+# STEP 5: RESTORE MAILBOXES (Moved last - slow operation)
 # ─────────────────────────────────────────────────────────────────────────────
-log "Starting restore..."
+restore_mailboxes() {
+  log "Step 5: Restoring mailboxes (OSE mode: postRestURL)..."
+  local dir="$BACKUP_ROOT/mailboxes/$BACKUP_DATE"
+  if [ ! -d "$dir" ]; then
+    warn "   Not found"
+    return 1
+  fi
+  
+  shopt -s nullglob
+  local files=("$dir"/*.tgz)
+  shopt -u nullglob
+  log "   Found ${#files[@]} backup file(s)"
+  if [ ${#files[@]} -eq 0 ]; then
+    warn "   No .tgz files!"
+    ls "$dir/"
+    return 1
+  fi
+  
+  local ok=0 fail=0
+  for f in "${files[@]}"; do
+    local fn
+    fn=$(basename "$f" .tgz)
+    local acc
+    acc=$(mailbox_filename_to_account "$fn")
+    
+    log "   Processing: $fn → $acc"
+    echo "$acc" | grep -q "@" || { warn "   Invalid: $acc"; continue; }
+    
+    # Skip if account doesn't exist (filtered in step 1)
+    if ! account_exists "$acc"; then
+      log "   Skipping $acc (account not created)"
+      continue
+    fi
+    
+    log "   Restoring mailbox: $acc"
+    
+    local restore_output
+    restore_output=$(timeout 120 su - "$ZIMBRA_USER" -c "zmmailbox -z -m '$acc' postRestURL '/?fmt=tgz&resolve=skip' '$f'" 2>&1) || true
+    echo "$restore_output" >> /tmp/zimbra-restore.log
+    
+    if echo "$restore_output" | grep -qi "usage:\|error\|exception\|fail"; then
+      fail=$((fail+1)); fail "      ✗ $acc"
+      log "   Error: $(echo "$restore_output" | head -2)"
+    else
+      ok=$((ok+1)); pass "      ✓ $acc"
+    fi
+  done
+  echo ""; pass "   Mailboxes: $ok ok, $fail fail"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN - Execute in Correct Order
+# ─────────────────────────────────────────────────────────────────────────────
+log "Starting restore in sequence: Accounts → Passwords → Preferences → DLs → Mailboxes"
 echo ""
 
+# Always do accounts first (if in modes)
+echo ",$MODES," | grep -q ",accounts," && { restore_accounts; echo ""; }
+
+# Then passwords
 echo ",$MODES," | grep -q ",passwords," && { restore_passwords; echo ""; }
-echo ",$MODES," | grep -q ",mailboxes," && { restore_mailboxes; echo ""; }
+
+# Then preferences
 echo ",$MODES," | grep -q ",preferences," && { restore_preferences; echo ""; }
+
+# Then distribution lists
 echo ",$MODES," | grep -q ",distribution-lists," && { restore_dls; echo ""; }
+
+# Mailboxes LAST (slow operation)
+echo ",$MODES," | grep -q ",mailboxes," && { restore_mailboxes; echo ""; }
 
 echo -e "${GREEN}========================================================${NC}"
 echo -e "${GREEN}  RESTORE COMPLETED${NC}"
 echo -e "${GREEN}========================================================${NC}"
 echo -e "Log: /tmp/zimbra-restore.log"
 echo -e "${YELLOW}Verify:${NC}"
+echo -e "  su - zimbra -c 'zmprov gaa | grep $DOMAIN'"
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraAccountStatus'"
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML' | head -3"
+echo -e "  su - zimbra -c 'zmprov gdlm officer@$DOMAIN'"
 echo -e "${GREEN}========================================================${NC}\n"
