@@ -376,7 +376,8 @@ mkdir -p "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
 
 END_TIME_FMT=$(date '+%Y-%m-%d %H:%M:%S')
 
-cat > "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt" <<EOF
+#cat > "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt" <<EOF
+cat > "$BACKUP_ROOT/BACKUP-SUMMARY.txt" <<EOF
 ========================================================
   ZIMBRA BACKUP SUMMARY (v2.4)
 ========================================================
@@ -423,7 +424,8 @@ RESTORE INSTRUCTIONS:
 ========================================================
 EOF
 
-pass "   Backup summary generated at: $BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt"
+#pass "   Backup summary generated at: $BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt"
+pass "   Backup summary generated at: $BACKUP_ROOT/BACKUP-SUMMARY.txt"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FINAL SUMMARY
