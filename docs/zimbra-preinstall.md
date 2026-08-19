@@ -73,6 +73,7 @@ Port yang Dibuka
 | 110 | POP3 | TCP |
 | 143 | IMAP | TCP |
 | 443 | HTTPS | TCP |
+| 465 | SMTPS | TCP |
 | 587 | SMTP Submission | TCP |
 | 993 | IMAPS | TCP |
 | 995 | POP3S | TCP |
