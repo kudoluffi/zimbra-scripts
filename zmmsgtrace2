@@ -132,9 +132,12 @@ use Pod::Usage qw(pod2usage);
 use Time::localtime qw(localtime);
 use Data::Dumper; $Data::Dumper::Sortkeys = 1; $Data::Dumper::Indent = 1; $Data::Dumper::Terse = 1;
 
+use MIME::Base64 qw(decode_base64);
+use MIME::QuotedPrint qw(decode_qp);
+
 my $DEBUG   = 0;
 my $LOGFILE = "/var/log/zimbra.log";
-my $VERSION = "1.10";
+my $VERSION = "1.13";
 my $Prog    = basename($0);
 
 # Regexes for Postfix Queue IDs
@@ -223,6 +226,36 @@ sub process_options {
     return %opt;
 }
 
+# ==========================================
+# Fungsi decode MIME header (perbaikan)
+# ==========================================
+sub decode_mime_header {
+    my ($str) = @_;
+    return '' unless defined $str;
+    # Jika tidak ada pola MIME, langsung return
+    return $str unless $str =~ /=\?[^?]+\?[BQ]\?[^?]+\?=/i;
+
+    my $result = '';
+    my $remaining = $str;
+    while ($remaining =~ /=\?([^?]+)\?([BQ])\?([^?]+)\?=/i) {
+        my $pre = $`;               # teks sebelum token
+        my $token = $&;             # token lengkap (tidak dipakai langsung)
+        my ($charset, $encoding, $encoded) = ($1, uc($2), $3);
+        my $part = '';
+        if ($encoding eq 'B') {
+            $part = decode_base64($encoded);
+        } elsif ($encoding eq 'Q') {
+            $part = decode_qp($encoded);
+            $part =~ s/_/ /g;
+        }
+        $result .= $pre . $part;
+        $remaining = $';            # sisa setelah token
+    }
+    $result .= $remaining;
+    return $result;
+}
+# ==========================================
+
 main();
 
 sub main {
@@ -309,33 +342,37 @@ sub doit {
                     $obj->{host} = $ent{host};
                 }
 
-                # --- Capture Subject (same as before) ---
+                # --- Capture Subject and DECODE MIME ---
                 if ($msg =~ /warning: header Subject:\s*(.*?)(?:\s+from\s+|; from=)/) {
-                    $header_info{$qid}->{subject} = $1;
+                    my $raw_subject = $1;
+                    $header_info{$qid}->{subject} = decode_mime_header($raw_subject);
                 }
 
-                # --- IMPROVED: Capture Attachment filenames (flexible) ---
+                # --- Capture Attachment filenames ---
                 if ($msg =~ /warning: header Content-Disposition:/i) {
-                    my $fname = '';
-                    # Try various patterns
-                    if ($msg =~ /filename\*?=(?:UTF-8''([^;]+)|"([^"]+)"|([^\s;]+))/i) {
-                        $fname = $1 // $2 // $3;
+                    my @names;
+                    if ($msg =~ /filename\s*=\s*"([^"]+)"/i) {
+                        push @names, $1;
                     }
-                    # Fallback: simpler pattern without quotes
-                    elsif ($msg =~ /filename\s*=\s*([^\s;]+)/i) {
-                        $fname = $1;
+                    if ($msg =~ /filename\s*=\s*([^\s;]+)/i) {
+                        my $f = $1;
+                        $f =~ s/["';]//g;
+                        push @names, $f if $f;
                     }
-                    if ($fname) {
-                        # Decode URL encoding if it came from RFC 2231 (captured by group 1)
-                        if (defined $1 && $1 =~ /%/) {
-                            $fname =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/eg;
-                        }
-                        push @{ $header_info{$qid}->{attachments} }, $fname;
+                    if ($msg =~ /filename\*=\s*UTF-8''([^;\s]+)/i) {
+                        my $f = $1;
+                        $f =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/eg;
+                        push @names, $f;
+                    }
+                    my %seen;
+                    @names = grep { !$seen{$_}++ } @names;
+                    if (@names) {
+                        push @{ $header_info{$qid}->{attachments} }, @names;
                     }
                 }
                 # --- End capture ---
 
-                # Apply header info to obj if available
+                # Apply header info to obj
                 if (exists $header_info{$qid}) {
                     $obj->{subject} = $header_info{$qid}->{subject} if defined $header_info{$qid}->{subject};
                     if (defined $header_info{$qid}->{attachments} && @{ $header_info{$qid}->{attachments} }) {
@@ -343,7 +380,7 @@ sub doit {
                     }
                 }
 
-                # Original postfix parsing logic (unchanged)
+                # Original postfix parsing (unchanged)
                 if ( $msg =~ s/^reject: // ) {
                     my $ref = delete $posttmp{$key};
                     push( @msgs, $ref );
@@ -515,7 +552,6 @@ sub doit {
                 next unless contain( $opt->{_desthost}, @next );
             }
 
-            # --- Print with Subject and Attachment from $msg (already stored) ---
             print(
                 "Message ID '$msg->{messageId}'\n",
                 (defined $msg->{subject} && $msg->{subject} ne '' ? "Subject '$msg->{subject}'\n" : ""),
