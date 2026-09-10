@@ -189,23 +189,53 @@ log "Creating auto-renewal script..."
 cat > "$RENEW_SCRIPT" <<'RENEW_EOF'
 #!/bin/bash
 set -eo pipefail
+
 FQDN="${1:-$(hostname -f)}"
 LE_DIR="/etc/letsencrypt/live/$FQDN"
 SSL_DIR="/opt/zimbra/ssl/letsencrypt"
 ZIMBRA_SSL_DIR="/opt/zimbra/ssl/zimbra/commercial"
 
-echo "[$(date)] Starting Zimbra LE renewal..."
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+log "Starting Zimbra LE renewal check for $FQDN..."
+
+# Catat Hash sertifikat lama sebelum dijalankan
+OLD_HASH=""
+if [ -f "$LE_DIR/fullchain.pem" ]; then
+    OLD_HASH=$(md5sum "$LE_DIR/fullchain.pem" | awk '{print $1}')
+fi
+
+log "Stopping Zimbra proxy & mailboxd to free port 80/443..."
 su - zimbra -c "zmproxyctl stop; zmmailboxdctl stop" 2>/dev/null || true
 
-certbot renew --quiet --cert-name "$FQDN" --standalone --register-unsafely-without-email || { echo "[$(date)] Renewal failed"; su - zimbra -c "zmcontrol start"; exit 1; }
+# Menghapus --quiet agar output/proses Certbot masuk ke file log
+log "Running Certbot renewal process..."
+if certbot renew --cert-name "$FQDN" --standalone --register-unsafely-without-email; then
+    log "Certbot process completed successfully."
+else
+    log "ERROR: Certbot renewal failed! Restoring Zimbra services..."
+    su - zimbra -c "zmcontrol start"
+    exit 1
+fi
 
-if [ -d "$LE_DIR" ]; then
-  ROOTCA="-----BEGIN CERTIFICATE-----
+# Catat Hash sertifikat setelah certbot berjalan
+NEW_HASH=""
+if [ -f "$LE_DIR/fullchain.pem" ]; then
+    NEW_HASH=$(md5sum "$LE_DIR/fullchain.pem" | awk '{print $1}')
+fi
+
+# Jalankan deploy & restart hanya jika sertifikat benar-benar ter-update
+if [ -n "$NEW_HASH" ] && [ "$OLD_HASH" != "$NEW_HASH" ]; then
+    log "New certificate detected! Copying files & deploying to Zimbra..."
+
+    ROOTCA="-----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
 TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
 cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
 WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu
-ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY
+ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgRoot X
 MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc
 h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+
 0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U
@@ -231,30 +261,34 @@ oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
 mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
 emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----"
-  
-  for dir in "$SSL_DIR" "$ZIMBRA_SSL_DIR"; do
-    cp "$LE_DIR/fullchain.pem" "$dir/commercial.crt"
-    cp "$LE_DIR/privkey.pem" "$dir/commercial.key"
-    cp "$LE_DIR/chain.pem" "$dir/commercial_ca.crt"
-    echo "$ROOTCA" >> "$dir/commercial_ca.crt"
-    chown zimbra:zimbra "$dir"/*
-    chmod 600 "$dir/commercial.key"
-    chmod 644 "$dir/commercial.crt" "$dir/commercial_ca.crt"
-  done
-  
-  su - zimbra -c "/opt/zimbra/bin/zmcertmgr deploycrt comm $ZIMBRA_SSL_DIR/commercial.crt $ZIMBRA_SSL_DIR/commercial_ca.crt"
-  su - zimbra -c "zmcontrol restart"
-  echo "[$(date)] Certificate renewed & deployed successfully."
+
+    for dir in "$SSL_DIR" "$ZIMBRA_SSL_DIR"; do
+        mkdir -p "$dir"
+        cp "$LE_DIR/fullchain.pem" "$dir/commercial.crt"
+        cp "$LE_DIR/privkey.pem" "$dir/commercial.key"
+        cp "$LE_DIR/chain.pem" "$dir/commercial_ca.crt"
+        echo "$ROOTCA" >> "$dir/commercial_ca.crt"
+        chown zimbra:zimbra "$dir"/*
+        chmod 600 "$dir/commercial.key"
+        chmod 644 "$dir/commercial.crt" "$dir/commercial_ca.crt"
+    done
+
+    log "Deploying SSL certificate to Zimbra..."
+    su - zimbra -c "/opt/zimbra/bin/zmcertmgr deploycrt comm $ZIMBRA_SSL_DIR/commercial.crt $ZIMBRA_SSL_DIR/commercial_ca.crt"
+
+    log "Restarting Zimbra services..."
+    su - zimbra -c "zmcontrol restart"
+    log "Certificate renewed & deployed successfully."
 else
-  echo "[$(date)] Renewal failed: Cert dir missing."
-  su - zimbra -c "zmcontrol start"
-  exit 1
+    log "Certificate is NOT due for renewal yet (or not changed). No deployment needed."
+    log "Starting Zimbra proxy & mailboxd..."
+    su - zimbra -c "zmproxyctl start; zmmailboxdctl start" 2>/dev/null || true
 fi
 RENEW_EOF
 chmod +x "$RENEW_SCRIPT"
 
 log "Adding weekly renewal cron job..."
-echo "0 3 * * 1 root $RENEW_SCRIPT $FQDN >> /var/log/zimbra-le-renew.log 2>&1" > /etc/cron.d/zimbra-le-renew
+echo "30 0 * * 1 root $RENEW_SCRIPT $FQDN >> /var/log/zimbra-le-renew.log 2>&1" > /etc/cron.d/zimbra-le-renew
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FINAL SUMMARY
