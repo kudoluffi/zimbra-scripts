@@ -55,7 +55,7 @@ fi
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     if ! ufw status | grep -qE "^80(/tcp)?\s+ALLOW"; then
         warn "UFW aktif tapi port 80/tcp tidak terlihat ALLOW. HTTP-01 challenge (certbot) butuh port 80 terbuka dari luar."
-        warn "Jalankan: ufw allow 80/tcp   (dan pastikan Fortigate benar-benar forward port 80 ke server ini, bukan cuma 443)"
+        warn "Jalankan: ufw allow 80/tcp   (dan pastikan firewall benar-benar forward port 80 ke server ini, bukan cuma 443)"
     fi
 fi
 
@@ -87,7 +87,7 @@ apt-get install -y certbot curl
 
 if systemctl list-unit-files | grep -q '^certbot.timer'; then
     systemctl enable --now certbot.timer 2>/dev/null || warn "Tidak bisa enable certbot.timer, cek manual."
-    log "certbot.timer aktif (native twice-daily renewal check). Kita TIDAK pakai cron custom lagi."
+    log "certbot.timer aktif (native twice-daily renewal check)."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -298,7 +298,7 @@ echo -e "                  $HOOK_POST"
 echo -e "Install Log     : $LOG_FILE"
 echo -e "Renewal Log     : $RENEW_LOG"
 echo -e "${YELLOW}Catatan penting:${NC}"
-echo -e "• Pastikan Fortigate forward port 80 (bukan cuma 443) ke server ini,"
+echo -e "• Pastikan Firewall forward port 80 (bukan cuma 443) ke server ini,"
 echo -e "  atau renewal via HTTP-01 akan gagal saat certbot.timer jalan."
 echo -e "• Test alur renewal tanpa downtime real: certbot renew --dry-run"
 echo -e "• Cek timer: systemctl list-timers | grep certbot"
